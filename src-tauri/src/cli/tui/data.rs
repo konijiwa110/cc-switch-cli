@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use indexmap::IndexMap;
@@ -17,6 +18,11 @@ pub struct ProviderRow {
     pub provider: Provider,
     pub api_url: Option<String>,
     pub is_current: bool,
+    pub is_in_config: bool,
+    pub is_saved: bool,
+    pub is_default_model: bool,
+    pub primary_model_id: Option<String>,
+    pub default_model_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -99,6 +105,7 @@ impl ProxySnapshot {
             AppType::Codex => Some(self.codex_takeover),
             AppType::Gemini => Some(self.gemini_takeover),
             AppType::OpenCode => None,
+            AppType::OpenClaw => None,
         }
     }
 
@@ -154,15 +161,80 @@ fn load_providers(state: &AppState, app_type: &AppType) -> Result<ProvidersSnaps
     let providers = ProviderService::list(state, app_type.clone())?;
     let sorted = sort_providers(&providers);
 
-    let rows = sorted
+    let openclaw_live_providers = if matches!(app_type, AppType::OpenClaw) {
+        crate::openclaw_config::get_providers()?
+    } else {
+        serde_json::Map::new()
+    };
+    let openclaw_live_ids = openclaw_live_providers
+        .keys()
+        .cloned()
+        .collect::<HashSet<_>>();
+    let openclaw_default_model = if matches!(app_type, AppType::OpenClaw) {
+        crate::openclaw_config::get_default_model()?
+    } else {
+        None
+    };
+    let openclaw_default_model_ids = openclaw_default_model_ids_by_provider(
+        openclaw_default_model.as_ref(),
+    );
+    let openclaw_primary_default_provider_id = openclaw_default_model
+        .as_ref()
+        .and_then(|model| openclaw_default_model_ref_parts(&model.primary))
+        .map(|(provider_id, _)| provider_id.to_string());
+
+    let mut rows = sorted
         .into_iter()
-        .map(|(id, provider)| ProviderRow {
-            api_url: extract_api_url(&provider.settings_config, app_type),
-            is_current: id == current_id,
-            id: id.clone(),
-            provider,
+        .map(|(id, provider)| {
+            let provider = openclaw_provider_for_row(&id, provider, openclaw_live_providers.get(&id));
+
+            ProviderRow {
+                api_url: extract_api_url(&provider.settings_config, app_type),
+                is_current: id == current_id,
+                is_in_config: match app_type {
+                    AppType::OpenClaw => openclaw_live_ids.contains(&id),
+                    _ => true,
+                },
+                is_saved: true,
+                is_default_model: openclaw_primary_default_provider_id.as_deref()
+                    == Some(id.as_str()),
+                primary_model_id: extract_primary_model_id(
+                    &provider.settings_config,
+                    app_type,
+                    openclaw_live_providers.get(&id),
+                ),
+                default_model_id: openclaw_default_model_ids.get(&id).cloned(),
+                id: id.clone(),
+                provider,
+            }
         })
         .collect::<Vec<_>>();
+
+    if matches!(app_type, AppType::OpenClaw) {
+        for (id, live_provider) in &openclaw_live_providers {
+            if providers.contains_key(id) {
+                continue;
+            }
+
+            let provider = openclaw_live_only_provider(id, live_provider);
+            rows.push(ProviderRow {
+                api_url: extract_api_url(&provider.settings_config, app_type),
+                is_current: id == &current_id,
+                is_in_config: true,
+                is_saved: false,
+                is_default_model: openclaw_primary_default_provider_id.as_deref()
+                    == Some(id.as_str()),
+                primary_model_id: extract_primary_model_id(
+                    &provider.settings_config,
+                    app_type,
+                    Some(live_provider),
+                ),
+                default_model_id: openclaw_default_model_ids.get(id).cloned(),
+                id: id.clone(),
+                provider,
+            });
+        }
+    }
 
     Ok(ProvidersSnapshot { current_id, rows })
 }
@@ -220,7 +292,99 @@ fn extract_api_url(settings_config: &Value, app_type: &AppType) -> Option<String
             .get("baseURL")?
             .as_str()
             .map(|s| s.to_string()),
+        AppType::OpenClaw => settings_config
+            .get("baseUrl")
+            .or_else(|| settings_config.get("base_url"))?
+            .as_str()
+            .map(|s| s.to_string()),
     }
+}
+
+fn extract_primary_model_id(
+    settings_config: &Value,
+    app_type: &AppType,
+    openclaw_live_provider: Option<&Value>,
+) -> Option<String> {
+    match app_type {
+        AppType::OpenClaw => match openclaw_live_provider {
+            Some(live_provider) => openclaw_primary_model_id(live_provider),
+            None => openclaw_primary_model_id(settings_config),
+        },
+        _ => None,
+    }
+}
+
+fn openclaw_provider_for_row(id: &str, provider: Provider, openclaw_live_provider: Option<&Value>) -> Provider {
+    let Some(live_provider) = openclaw_live_provider else {
+        return provider;
+    };
+
+    let mut provider = provider;
+    provider.settings_config = live_provider.clone();
+    if let Some(name) = openclaw_provider_display_name(id, live_provider) {
+        provider.name = name;
+    }
+    provider
+}
+
+fn openclaw_live_only_provider(id: &str, live_provider: &Value) -> Provider {
+    Provider::with_id(
+        id.to_string(),
+        openclaw_provider_display_name(id, live_provider).unwrap_or_else(|| id.to_string()),
+        live_provider.clone(),
+        None,
+    )
+}
+
+fn openclaw_provider_display_name(id: &str, provider_value: &Value) -> Option<String> {
+    let primary_model = provider_value
+        .get("models")
+        .and_then(Value::as_array)
+        .and_then(|models| models.first())?;
+
+    Some(
+        primary_model
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or(id)
+            .to_string(),
+    )
+}
+
+fn openclaw_primary_model_id(provider_value: &Value) -> Option<String> {
+    provider_value
+        .get("models")
+        .and_then(Value::as_array)
+        .and_then(|models| models.first())
+        .and_then(|model| model.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn openclaw_default_model_ids_by_provider(
+    default_model: Option<&crate::openclaw_config::OpenClawDefaultModel>,
+) -> HashMap<String, String> {
+    let Some(default_model) = default_model else {
+        return HashMap::new();
+    };
+
+    let mut ids = HashMap::new();
+    for model_ref in std::iter::once(default_model.primary.as_str())
+        .chain(default_model.fallbacks.iter().map(String::as_str))
+    {
+        let Some((provider_id, model_id)) = openclaw_default_model_ref_parts(model_ref) else {
+            continue;
+        };
+        ids.entry(provider_id.to_string())
+            .or_insert_with(|| model_id.to_string());
+    }
+
+    ids
+}
+
+fn openclaw_default_model_ref_parts(default_ref: &str) -> Option<(&str, &str)> {
+    default_ref.split_once('/')
 }
 
 fn load_mcp(state: &AppState) -> Result<McpSnapshot, AppError> {
@@ -372,6 +536,74 @@ fn load_skills_snapshot() -> Result<SkillsSnapshot, AppError> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use serial_test::serial;
+    use std::path::Path;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use tempfile::tempdir;
+
+    use crate::settings::{get_settings, update_settings, AppSettings};
+
+    fn test_mutex() -> &'static Mutex<()> {
+        static MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+        MUTEX.get_or_init(|| Mutex::new(()))
+    }
+
+    fn lock_test_mutex() -> MutexGuard<'static, ()> {
+        test_mutex()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    struct HomeGuard {
+        old_home: Option<std::ffi::OsString>,
+        old_userprofile: Option<std::ffi::OsString>,
+    }
+
+    impl HomeGuard {
+        fn set(home: &Path) -> Self {
+            let old_home = std::env::var_os("HOME");
+            let old_userprofile = std::env::var_os("USERPROFILE");
+            std::env::set_var("HOME", home);
+            std::env::set_var("USERPROFILE", home);
+            Self {
+                old_home,
+                old_userprofile,
+            }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.old_home.take() {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match self.old_userprofile.take() {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+        }
+    }
+
+    struct SettingsGuard {
+        previous: AppSettings,
+    }
+
+    impl SettingsGuard {
+        fn with_openclaw_dir(path: &Path) -> Self {
+            let previous = get_settings();
+            let mut settings = AppSettings::default();
+            settings.openclaw_config_dir = Some(path.display().to_string());
+            update_settings(settings).expect("set openclaw override dir");
+            Self { previous }
+        }
+    }
+
+    impl Drop for SettingsGuard {
+        fn drop(&mut self) {
+            update_settings(self.previous.clone()).expect("restore previous settings");
+        }
+    }
 
     #[test]
     fn extract_api_url_gemini_prefers_google_env_key() {
@@ -497,6 +729,205 @@ mod tests {
                 .as_ref()
                 .map(|target| target.provider_name.as_str()),
             Some("Claude Test Provider")
+        );
+    }
+
+    #[test]
+    fn openclaw_default_model_ids_by_provider_includes_fallback_only_provider() {
+        let default_model = crate::openclaw_config::OpenClawDefaultModel {
+            primary: "primary/model-primary".to_string(),
+            fallbacks: vec![
+                "fallback-only/shared-model".to_string(),
+                "primary/model-fallback".to_string(),
+            ],
+            extra: std::collections::HashMap::new(),
+        };
+
+        let model_ids = openclaw_default_model_ids_by_provider(Some(&default_model));
+
+        assert_eq!(
+            model_ids.get("primary").map(String::as_str),
+            Some("model-primary")
+        );
+        assert_eq!(
+            model_ids.get("fallback-only").map(String::as_str),
+            Some("shared-model")
+        );
+    }
+
+    #[test]
+    fn openclaw_default_model_ids_by_provider_prefers_primary_reference_for_same_provider() {
+        let default_model = crate::openclaw_config::OpenClawDefaultModel {
+            primary: "demo/shared-model".to_string(),
+            fallbacks: vec!["demo/secondary-model".to_string()],
+            extra: std::collections::HashMap::new(),
+        };
+
+        assert_eq!(
+            openclaw_default_model_ids_by_provider(Some(&default_model))
+                .get("demo")
+                .map(String::as_str),
+            Some("shared-model")
+        );
+    }
+
+    #[test]
+    fn extract_primary_model_id_openclaw_prefers_live_provider_models() {
+        let saved = json!({
+            "models": [
+                {"id": "snapshot-primary"},
+                {"id": "fallback-1"}
+            ]
+        });
+        let live = json!({
+            "models": [
+                {"id": "live-primary"},
+                {"id": "snapshot-primary"},
+                {"id": "fallback-1"}
+            ]
+        });
+
+        assert_eq!(
+            extract_primary_model_id(&saved, &AppType::OpenClaw, Some(&live)),
+            Some("live-primary".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_primary_model_id_openclaw_falls_back_to_saved_provider_models() {
+        let saved = json!({
+            "models": [
+                {"id": "snapshot-primary"},
+                {"id": "fallback-1"}
+            ]
+        });
+
+        assert_eq!(
+            extract_primary_model_id(&saved, &AppType::OpenClaw, None),
+            Some("snapshot-primary".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_primary_model_id_openclaw_does_not_fall_back_when_live_provider_has_no_models() {
+        let saved = json!({
+            "models": [
+                {"id": "snapshot-primary"},
+                {"id": "fallback-1"}
+            ]
+        });
+        let live = json!({"models": []});
+
+        assert_eq!(
+            extract_primary_model_id(&saved, &AppType::OpenClaw, Some(&live)),
+            None
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn load_providers_openclaw_shows_live_only_provider_without_importing_snapshot() {
+        let _guard = lock_test_mutex();
+        let temp = tempdir().expect("create tempdir");
+        let openclaw_dir = temp.path().join(".openclaw");
+        std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+        let _home = HomeGuard::set(temp.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        crate::openclaw_config::set_provider(
+            "live-only",
+            json!({
+                "baseUrl": "https://api.example.com/v1",
+                "models": [
+                    {"id": "openclaw-live-model", "name": "Live Only Model"}
+                ]
+            }),
+        )
+        .expect("seed live openclaw provider");
+
+        let state = load_state().expect("load state");
+        assert!(
+            ProviderService::list(&state, AppType::OpenClaw)
+                .expect("list providers before load")
+                .is_empty(),
+            "precondition: DB snapshot should start empty"
+        );
+
+        let snapshot = load_providers(&state, &AppType::OpenClaw).expect("load openclaw rows");
+        let row = snapshot
+            .rows
+            .iter()
+            .find(|row| row.id == "live-only")
+            .expect("live-only provider should appear in TUI rows");
+        assert!(row.is_in_config);
+        assert_eq!(row.provider.name, "Live Only Model");
+        assert_eq!(row.primary_model_id.as_deref(), Some("openclaw-live-model"));
+
+        assert!(
+            ProviderService::list(&state, AppType::OpenClaw)
+                .expect("list providers after load")
+                .is_empty(),
+            "loading OpenClaw rows should not persist live-only providers into the snapshot"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn load_providers_openclaw_prefers_live_values_for_existing_snapshot_provider() {
+        let _guard = lock_test_mutex();
+        let temp = tempdir().expect("create tempdir");
+        let openclaw_dir = temp.path().join(".openclaw");
+        std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+        let _home = HomeGuard::set(temp.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        let state = load_state().expect("load state");
+        {
+            let mut config = state.config.write().expect("lock config");
+            let manager = config
+                .get_manager_mut(&AppType::OpenClaw)
+                .expect("openclaw manager");
+            manager.providers.insert(
+                "shared-id".to_string(),
+                Provider::with_id(
+                    "shared-id".to_string(),
+                    "Saved Snapshot Name".to_string(),
+                    json!({
+                        "baseUrl": "https://snapshot.example.com/v1",
+                        "models": [
+                            {"id": "snapshot-model", "name": "Snapshot Model"}
+                        ]
+                    }),
+                    None,
+                ),
+            );
+        }
+        state.save().expect("persist snapshot provider");
+
+        crate::openclaw_config::set_provider(
+            "shared-id",
+            json!({
+                "baseUrl": "https://live.example.com/v1",
+                "models": [
+                    {"id": "live-model", "name": "Live Model Name"}
+                ]
+            }),
+        )
+        .expect("seed live openclaw provider");
+
+        let snapshot = load_providers(&state, &AppType::OpenClaw).expect("load openclaw rows");
+        let row = snapshot
+            .rows
+            .iter()
+            .find(|row| row.id == "shared-id")
+            .expect("existing snapshot provider should still be listed");
+
+        assert_eq!(row.provider.name, "Live Model Name");
+        assert_eq!(row.api_url.as_deref(), Some("https://live.example.com/v1"));
+        assert_eq!(row.primary_model_id.as_deref(), Some("live-model"));
+        assert_eq!(
+            row.provider.settings_config["baseUrl"].as_str(),
+            Some("https://live.example.com/v1")
         );
     }
 }

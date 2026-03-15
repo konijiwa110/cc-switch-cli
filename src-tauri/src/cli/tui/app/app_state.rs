@@ -53,6 +53,13 @@ pub enum Action {
     ProviderSwitch {
         id: String,
     },
+    ProviderRemoveFromConfig {
+        id: String,
+    },
+    ProviderSetDefaultModel {
+        provider_id: String,
+        model_id: String,
+    },
     ProviderDelete {
         id: String,
     },

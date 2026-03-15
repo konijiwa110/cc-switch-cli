@@ -6,6 +6,8 @@ use crate::app_config::AppType;
 use crate::codex_config::{get_codex_auth_path, get_codex_config_path};
 use crate::config::{delete_file, get_claude_settings_path, read_json_file, write_json_file};
 use crate::error::AppError;
+use crate::provider::Provider;
+use crate::store::AppState;
 
 #[derive(Clone)]
 pub(super) enum LiveSnapshot {
@@ -22,6 +24,9 @@ pub(super) enum LiveSnapshot {
     },
     OpenCode {
         config: Option<Value>,
+    },
+    OpenClaw {
+        config_source: Option<String>,
     },
 }
 
@@ -78,6 +83,14 @@ impl LiveSnapshot {
                 let path = crate::opencode_config::get_opencode_config_path();
                 if let Some(value) = config {
                     write_json_file(&path, value)?;
+                } else if path.exists() {
+                    delete_file(&path)?;
+                }
+            }
+            LiveSnapshot::OpenClaw { config_source } => {
+                let path = crate::openclaw_config::get_openclaw_config_path();
+                if let Some(source) = config_source {
+                    crate::openclaw_config::write_openclaw_config_source(source)?;
                 } else if path.exists() {
                     delete_file(&path)?;
                 }
@@ -141,5 +154,54 @@ pub(super) fn capture_live_snapshot(app_type: &AppType) -> Result<LiveSnapshot, 
             };
             Ok(LiveSnapshot::OpenCode { config })
         }
+        AppType::OpenClaw => {
+            let config_source = crate::openclaw_config::read_openclaw_config_source()?;
+            Ok(LiveSnapshot::OpenClaw { config_source })
+        }
     }
+}
+
+pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, AppError> {
+    let providers = crate::openclaw_config::get_typed_providers()?;
+    if providers.is_empty() {
+        return Ok(0);
+    }
+
+    let mut imported = 0;
+    {
+        let mut config = state.config.write().map_err(AppError::from)?;
+        config.ensure_app(&AppType::OpenClaw);
+        let manager = config
+            .get_manager_mut(&AppType::OpenClaw)
+            .ok_or_else(|| AppError::Config("OpenClaw manager missing".to_string()))?;
+
+        for (id, provider_config) in providers {
+            if id.trim().is_empty() || provider_config.models.is_empty() {
+                continue;
+            }
+            if manager.providers.contains_key(&id) {
+                continue;
+            }
+
+            let name = provider_config
+                .models
+                .first()
+                .and_then(|model| model.name.clone())
+                .unwrap_or_else(|| id.clone());
+            let settings_config = serde_json::to_value(&provider_config)
+                .map_err(|source| AppError::JsonSerialize { source })?;
+
+            manager.providers.insert(
+                id.clone(),
+                Provider::with_id(id, name, settings_config, None),
+            );
+            imported += 1;
+        }
+    }
+
+    if imported > 0 {
+        state.save()?;
+    }
+
+    Ok(imported)
 }

@@ -325,7 +325,16 @@ pub(crate) fn provider_field_label_and_value(
         ProviderAddField::GeminiApiKey => texts::tui_label_api_key().to_string(),
         ProviderAddField::GeminiBaseUrl => texts::tui_label_base_url().to_string(),
         ProviderAddField::GeminiModel => texts::model_label().to_string(),
-        ProviderAddField::OpenCodeNpmPackage => texts::tui_label_provider_package().to_string(),
+        ProviderAddField::OpenClawApiProtocol => texts::tui_label_openclaw_api().to_string(),
+        ProviderAddField::OpenClawUserAgent => texts::tui_label_openclaw_user_agent().to_string(),
+        ProviderAddField::OpenClawModels => texts::tui_label_openclaw_models().to_string(),
+        ProviderAddField::OpenCodeNpmPackage => {
+            if provider.app_type == AppType::OpenClaw {
+                texts::tui_label_openclaw_api().to_string()
+            } else {
+                texts::tui_label_provider_package().to_string()
+            }
+        }
         ProviderAddField::OpenCodeApiKey => texts::tui_label_api_key().to_string(),
         ProviderAddField::OpenCodeBaseUrl => texts::tui_label_base_url().to_string(),
         ProviderAddField::OpenCodeModelId => texts::tui_label_opencode_model_id().to_string(),
@@ -361,6 +370,17 @@ pub(crate) fn provider_field_label_and_value(
             GeminiAuthType::OAuth => "oauth".to_string(),
             GeminiAuthType::ApiKey => "api_key".to_string(),
         },
+        ProviderAddField::OpenClawApiProtocol => {
+            provider.opencode_npm_package.value.trim().to_string()
+        }
+        ProviderAddField::OpenClawUserAgent => {
+            if provider.openclaw_user_agent {
+                format!("[{}]", texts::tui_marker_active())
+            } else {
+                "[ ]".to_string()
+            }
+        }
+        ProviderAddField::OpenClawModels => provider.openclaw_models_summary(),
         ProviderAddField::CommonConfigDivider => "- - - - - - - - - -".to_string(),
         ProviderAddField::CommonSnippet => texts::tui_key_open().to_string(),
         _ => provider
@@ -426,6 +446,13 @@ pub(crate) fn provider_field_editor_line(
             ProviderAddField::GeminiAuthType => {
                 format!("auth_type = {}", provider.gemini_auth_type.as_str())
             }
+            ProviderAddField::OpenClawApiProtocol => {
+                format!("api = {}", provider.opencode_npm_package.value.trim())
+            }
+            ProviderAddField::OpenClawUserAgent => {
+                format!("send_user_agent = {}", provider.openclaw_user_agent)
+            }
+            ProviderAddField::OpenClawModels => texts::tui_openclaw_models_open_hint().to_string(),
             _ => String::new(),
         };
         (Line::raw(text), 0)

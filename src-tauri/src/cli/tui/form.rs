@@ -13,6 +13,17 @@ mod tests;
 
 pub use provider_json::strip_provider_internal_fields;
 
+pub const OPENCLAW_DEFAULT_API_PROTOCOL: &str = "openai-completions";
+pub const OPENCLAW_DEFAULT_USER_AGENT: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:148.0) Gecko/20100101 Firefox/148.0";
+pub const OPENCLAW_API_PROTOCOLS: [&str; 5] = [
+    "openai-completions",
+    "openai-responses",
+    "anthropic-messages",
+    "google-generative-ai",
+    "bedrock-converse-stream",
+];
+
 #[derive(Debug, Clone, Default)]
 pub struct TextInput {
     pub value: String,
@@ -223,6 +234,9 @@ pub enum ProviderAddField {
     GeminiApiKey,
     GeminiBaseUrl,
     GeminiModel,
+    OpenClawApiProtocol,
+    OpenClawUserAgent,
+    OpenClawModels,
     OpenCodeNpmPackage,
     OpenCodeApiKey,
     OpenCodeBaseUrl,
@@ -288,6 +302,8 @@ pub struct ProviderAddFormState {
     pub gemini_base_url: TextInput,
     pub gemini_model: TextInput,
 
+    pub openclaw_user_agent: bool,
+    pub openclaw_models: Vec<Value>,
     pub opencode_npm_package: TextInput,
     pub opencode_api_key: TextInput,
     pub opencode_base_url: TextInput,

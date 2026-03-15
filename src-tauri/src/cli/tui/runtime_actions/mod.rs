@@ -149,6 +149,11 @@ pub(crate) fn handle_action(
         Action::EditorOpenExternal => editor::open_external(&mut ctx),
         Action::EditorSubmit { submit, content } => editor::submit(&mut ctx, submit, content),
         Action::ProviderSwitch { id } => providers::switch(&mut ctx, id),
+        Action::ProviderRemoveFromConfig { id } => providers::remove_from_config(&mut ctx, id),
+        Action::ProviderSetDefaultModel {
+            provider_id,
+            model_id,
+        } => providers::set_default_model(&mut ctx, provider_id, model_id),
         Action::ProviderDelete { id } => providers::delete(&mut ctx, id),
         Action::ProviderSpeedtest { url } => providers::speedtest(&mut ctx, url),
         Action::ProviderStreamCheck { id } => providers::stream_check(&mut ctx, id),

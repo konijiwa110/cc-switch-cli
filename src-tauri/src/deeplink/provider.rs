@@ -139,6 +139,7 @@ fn build_provider_from_request(
         AppType::Codex => build_codex_settings(request),
         AppType::Gemini => build_gemini_settings(request),
         AppType::OpenCode => build_opencode_settings(request),
+        AppType::OpenClaw => build_openclaw_settings(request),
     };
 
     let meta = build_provider_meta(request)?;
@@ -325,6 +326,32 @@ fn build_opencode_settings(request: &DeepLinkImportRequest) -> serde_json::Value
         "options": options,
         "models": models
     })
+}
+
+fn build_openclaw_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
+    let endpoint = get_primary_endpoint(request);
+    let mut settings = serde_json::Map::new();
+
+    if !endpoint.is_empty() {
+        settings.insert("baseUrl".to_string(), json!(endpoint));
+    }
+    if let Some(api_key) = &request.api_key {
+        settings.insert("apiKey".to_string(), json!(api_key));
+    }
+    settings.insert("api".to_string(), json!("openai"));
+
+    if let Some(model) = request
+        .model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        settings.insert(
+            "models".to_string(),
+            json!([{ "id": model, "name": model }]),
+        );
+    }
+
+    serde_json::Value::Object(settings)
 }
 
 /// Parse and merge configuration from Base64 encoded config or remote URL.

@@ -27,6 +27,9 @@ pub(super) fn submit(
     match submit {
         EditorSubmit::PromptEdit { id } => submit_prompt_edit(ctx, id, content),
         EditorSubmit::ProviderFormApplyJson => submit_provider_form_apply_json(ctx, content),
+        EditorSubmit::ProviderFormApplyOpenClawModels => {
+            submit_provider_form_apply_openclaw_models(ctx, content)
+        }
         EditorSubmit::ProviderFormApplyCodexAuth => {
             submit_provider_form_apply_codex_auth(ctx, content)
         }
@@ -121,6 +124,41 @@ fn submit_provider_form_apply_json(
             return Ok(());
         }
     }
+    ctx.app.editor = None;
+    Ok(())
+}
+
+fn submit_provider_form_apply_openclaw_models(
+    ctx: &mut RuntimeActionContext<'_>,
+    content: String,
+) -> Result<(), AppError> {
+    let models_value: Value = match serde_json::from_str(&content) {
+        Ok(value) => value,
+        Err(e) => {
+            ctx.app.push_toast(
+                texts::tui_toast_invalid_json(&e.to_string()),
+                ToastKind::Error,
+            );
+            return Ok(());
+        }
+    };
+
+    if !models_value.is_array() {
+        ctx.app
+            .push_toast(texts::tui_toast_json_must_be_array(), ToastKind::Error);
+        return Ok(());
+    }
+
+    let apply_result = match ctx.app.form.as_mut() {
+        Some(FormState::ProviderAdd(form)) => form.apply_openclaw_models_value(models_value),
+        _ => Ok(()),
+    };
+
+    if let Err(err) = apply_result {
+        ctx.app.push_toast(err, ToastKind::Error);
+        return Ok(());
+    }
+
     ctx.app.editor = None;
     Ok(())
 }

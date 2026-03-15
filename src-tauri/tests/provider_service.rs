@@ -584,6 +584,461 @@ fn provider_service_switch_missing_provider_returns_error() {
 }
 
 #[test]
+fn provider_service_switch_openclaw_syncs_only_target_entry() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::OpenClaw)
+            .expect("openclaw manager");
+        manager.providers.insert(
+            "keep".to_string(),
+            Provider::with_id(
+                "keep".to_string(),
+                "Keep".to_string(),
+                json!({
+                    "apiKey": "sk-keep",
+                    "baseUrl": "https://keep.example/v1",
+                    "models": [{ "id": "keep-model" }]
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "target".to_string(),
+            Provider::with_id(
+                "target".to_string(),
+                "Target".to_string(),
+                json!({
+                    "apiKey": "sk-target",
+                    "baseUrl": "https://target.example/v1",
+                    "models": [{ "id": "target-model" }]
+                }),
+                None,
+            ),
+        );
+    }
+
+    let openclaw_dir = home.join(".openclaw");
+    std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+    let openclaw_path = openclaw_dir.join("openclaw.json");
+    std::fs::write(
+        &openclaw_path,
+        serde_json::to_string_pretty(&json!({
+            "models": {
+                "mode": "merge",
+                "providers": {
+                    "keep": {
+                        "apiKey": "sk-keep",
+                        "baseUrl": "https://keep.example/v1",
+                        "models": [{ "id": "keep-model" }]
+                    }
+                }
+            }
+        }))
+        .expect("serialize openclaw live config"),
+    )
+    .expect("seed openclaw live config");
+
+    let state = state_from_config(config);
+
+    ProviderService::switch(&state, AppType::OpenClaw, "target")
+        .expect("switch openclaw provider should succeed");
+
+    let live_after: serde_json::Value =
+        read_json_file(&openclaw_path).expect("read openclaw live config after switch");
+    let providers = live_after["models"]["providers"]
+        .as_object()
+        .expect("openclaw config should contain providers map");
+    assert!(providers.contains_key("keep"));
+    assert!(providers.contains_key("target"));
+    assert_eq!(
+        providers["target"]["baseUrl"], "https://target.example/v1",
+        "switch should sync the selected provider into live config"
+    );
+
+    let guard = state
+        .config
+        .read()
+        .expect("read openclaw config after switch");
+    let manager = guard
+        .get_manager(&AppType::OpenClaw)
+        .expect("openclaw manager after switch");
+    assert!(
+        manager.current.is_empty(),
+        "additive-mode switch should not set current provider"
+    );
+}
+
+#[test]
+fn provider_service_import_default_openclaw_skips_additive_mode() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let openclaw_dir = home.join(".openclaw");
+    std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+    let openclaw_path = openclaw_dir.join("openclaw.json");
+    std::fs::write(
+        &openclaw_path,
+        r#"{
+            models: {
+                mode: 'merge',
+                providers: {
+                    openai: {
+                        apiKey: 'sk-openai',
+                        baseUrl: 'https://api.example.com/v1',
+                        models: [{ id: 'gpt-4.1', name: 'GPT-4.1' }],
+                    },
+                },
+            },
+        }"#,
+    )
+    .expect("seed openclaw json5 live config");
+
+    let state = state_from_config(MultiAppConfig::default());
+
+    ProviderService::import_default_config(&state, AppType::OpenClaw)
+        .expect("generic import should skip additive mode apps");
+
+    let guard = state
+        .config
+        .read()
+        .expect("read openclaw config after generic import");
+    let manager = guard
+        .get_manager(&AppType::OpenClaw)
+        .expect("openclaw manager after generic import");
+    assert!(
+        manager.providers.is_empty(),
+        "generic import_default_config should stay aligned with upstream and skip OpenClaw"
+    );
+}
+
+#[test]
+fn provider_service_import_openclaw_providers_from_live_imports_all_live_providers_from_json5() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let openclaw_dir = home.join(".openclaw");
+    std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+    let openclaw_path = openclaw_dir.join("openclaw.json");
+    std::fs::write(
+        &openclaw_path,
+        r#"{
+            models: {
+                mode: 'merge',
+                providers: {
+                    openai: {
+                        name: 'Top Level Name Should Be Ignored',
+                        apiKey: 'sk-openai',
+                        baseUrl: 'https://api.example.com/v1',
+                        models: [
+                            {
+                                id: 'gpt-4.1',
+                                name: 'GPT-4.1',
+                            },
+                        ],
+                    },
+                    anthropic: {
+                        name: 'Anthropic',
+                        api_key: 'sk-anthropic',
+                        base_url: 'https://anthropic.example/v1',
+                    },
+                    modeless: {
+                        apiKey: 'sk-modeless',
+                        baseUrl: 'https://modeless.example/v1',
+                        models: [],
+                    },
+                },
+            },
+        }"#,
+    )
+    .expect("seed openclaw json5 live config");
+
+    let state = state_from_config(MultiAppConfig::default());
+
+    ProviderService::import_openclaw_providers_from_live(&state)
+        .expect("import openclaw live config should succeed");
+
+    let guard = state
+        .config
+        .read()
+        .expect("read openclaw config after import");
+    let manager = guard
+        .get_manager(&AppType::OpenClaw)
+        .expect("openclaw manager after import");
+    assert_eq!(manager.providers.len(), 1);
+    assert!(manager.providers.contains_key("openai"));
+    assert!(!manager.providers.contains_key("anthropic"));
+    assert!(!manager.providers.contains_key("modeless"));
+    assert!(
+        manager.current.is_empty(),
+        "importing additive-mode providers should not set current"
+    );
+
+    let openai = manager
+        .providers
+        .get("openai")
+        .expect("openai provider should be imported");
+    assert_eq!(openai.name, "GPT-4.1");
+    assert_eq!(openai.settings_config["apiKey"], "sk-openai");
+    assert_eq!(
+        openai.settings_config["baseUrl"],
+        "https://api.example.com/v1"
+    );
+    assert_eq!(openai.settings_config["models"][0]["name"], "GPT-4.1");
+}
+
+#[test]
+fn provider_service_import_openclaw_providers_from_live_imports_missing_live_providers_incrementally(
+) {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let openclaw_dir = home.join(".openclaw");
+    std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+    let openclaw_path = openclaw_dir.join("openclaw.json");
+    std::fs::write(
+        &openclaw_path,
+        r#"{
+            models: {
+                mode: 'merge',
+                providers: {
+                    openai: {
+                        apiKey: 'sk-openai',
+                        baseUrl: 'https://api.example.com/v1',
+                        models: [{ id: 'gpt-4.1', name: 'GPT-4.1' }],
+                    },
+                    groq: {
+                        apiKey: 'sk-groq',
+                        baseUrl: 'https://groq.example/v1',
+                        models: [{ id: 'llama-4', name: 'Llama 4' }],
+                    },
+                },
+            },
+        }"#,
+    )
+    .expect("seed openclaw json5 live config");
+
+    let mut config = MultiAppConfig::default();
+    config
+        .get_manager_mut(&AppType::OpenClaw)
+        .expect("openclaw manager")
+        .providers
+        .insert(
+            "openai".to_string(),
+            Provider::with_id(
+                "openai".to_string(),
+                "Already Imported".to_string(),
+                json!({
+                    "apiKey": "sk-existing",
+                    "baseUrl": "https://existing.example/v1",
+                    "models": [{ "id": "gpt-4.1", "name": "Existing GPT-4.1" }]
+                }),
+                None,
+            ),
+        );
+
+    let state = state_from_config(config);
+
+    ProviderService::import_openclaw_providers_from_live(&state)
+        .expect("import openclaw live config should succeed");
+
+    let guard = state
+        .config
+        .read()
+        .expect("read openclaw config after incremental import");
+    let manager = guard
+        .get_manager(&AppType::OpenClaw)
+        .expect("openclaw manager after incremental import");
+
+    assert_eq!(manager.providers.len(), 2);
+    assert!(manager.providers.contains_key("openai"));
+    assert!(manager.providers.contains_key("groq"));
+    assert_eq!(
+        manager
+            .providers
+            .get("openai")
+            .expect("existing provider should stay untouched")
+            .name,
+        "Already Imported"
+    );
+    assert_eq!(
+        manager
+            .providers
+            .get("groq")
+            .expect("missing provider should be imported")
+            .name,
+        "Llama 4"
+    );
+}
+
+#[test]
+fn provider_service_import_openclaw_providers_from_live_skips_modeless_provider_even_if_default_references_it(
+) {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let openclaw_dir = home.join(".openclaw");
+    std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+    let openclaw_path = openclaw_dir.join("openclaw.json");
+    std::fs::write(
+        &openclaw_path,
+        r#"{
+            models: {
+                mode: 'merge',
+                providers: {
+                    openai: {
+                        apiKey: 'sk-openai',
+                        baseUrl: 'https://api.example.com/v1',
+                        models: [],
+                    },
+                },
+            },
+            agents: {
+                defaults: {
+                    model: {
+                        primary: 'openai/gpt-4.1',
+                    },
+                },
+            },
+        }"#,
+    )
+    .expect("seed openclaw json5 live config");
+
+    let state = state_from_config(MultiAppConfig::default());
+
+    ProviderService::import_openclaw_providers_from_live(&state)
+        .expect("import openclaw live config should succeed");
+
+    let guard = state
+        .config
+        .read()
+        .expect("read openclaw config after import");
+    let manager = guard
+        .get_manager(&AppType::OpenClaw)
+        .expect("openclaw manager after import");
+
+    assert!(
+        !manager.providers.contains_key("openai"),
+        "OpenClaw import should stay aligned with upstream and skip providers without models"
+    );
+}
+
+#[test]
+fn provider_service_import_openclaw_providers_from_live_uses_provider_id_when_primary_model_has_no_name(
+) {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let openclaw_dir = home.join(".openclaw");
+    std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+    let openclaw_path = openclaw_dir.join("openclaw.json");
+    std::fs::write(
+        &openclaw_path,
+        r#"{
+            models: {
+                mode: 'merge',
+                providers: {
+                    openai: {
+                        name: 'Top Level Name Should Stay Ignored',
+                        apiKey: 'sk-openai',
+                        baseUrl: 'https://api.example.com/v1',
+                        models: [{ id: 'gpt-4.1' }],
+                    },
+                },
+            },
+        }"#,
+    )
+    .expect("seed openclaw json5 live config");
+
+    let state = state_from_config(MultiAppConfig::default());
+
+    ProviderService::import_openclaw_providers_from_live(&state)
+        .expect("import openclaw live config should succeed");
+
+    let guard = state
+        .config
+        .read()
+        .expect("read openclaw config after import");
+    let manager = guard
+        .get_manager(&AppType::OpenClaw)
+        .expect("openclaw manager after import");
+    let openai = manager
+        .providers
+        .get("openai")
+        .expect("openai provider should be imported");
+
+    assert_eq!(
+        openai.name, "openai",
+        "OpenClaw import should fall back to provider id when the first model has no name"
+    );
+}
+
+#[test]
+fn provider_service_import_openclaw_providers_from_live_ignores_later_model_name_when_first_model_has_no_name(
+) {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let openclaw_dir = home.join(".openclaw");
+    std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+    let openclaw_path = openclaw_dir.join("openclaw.json");
+    std::fs::write(
+        &openclaw_path,
+        r#"{
+            models: {
+                mode: 'merge',
+                providers: {
+                    openai: {
+                        apiKey: 'sk-openai',
+                        baseUrl: 'https://api.example.com/v1',
+                        models: [
+                            { id: 'gpt-4.1' },
+                            {
+                                id: 'gpt-4.1-mini',
+                                name: 'Later Name Should Stay Ignored',
+                            },
+                        ],
+                    },
+                },
+            },
+        }"#,
+    )
+    .expect("seed openclaw json5 live config");
+
+    let state = state_from_config(MultiAppConfig::default());
+
+    ProviderService::import_openclaw_providers_from_live(&state)
+        .expect("import openclaw live config should succeed");
+
+    let guard = state
+        .config
+        .read()
+        .expect("read openclaw config after import");
+    let manager = guard
+        .get_manager(&AppType::OpenClaw)
+        .expect("openclaw manager after import");
+    let openai = manager
+        .providers
+        .get("openai")
+        .expect("openai provider should be imported");
+
+    assert_eq!(
+        openai.name, "openai",
+        "OpenClaw import should only consider the first model name before falling back to provider id"
+    );
+}
+
+#[test]
 fn provider_service_switch_codex_missing_auth_is_allowed() {
     let _guard = lock_test_mutex();
     reset_test_fs();
@@ -1033,6 +1488,370 @@ fn provider_service_delete_claude_removes_provider_files() {
     assert!(
         !by_name.exists() && !by_id.exists(),
         "provider config files should be deleted"
+    );
+}
+
+#[test]
+fn provider_service_delete_openclaw_removes_provider_from_live_and_state() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::OpenClaw)
+            .expect("openclaw manager");
+        manager.providers.insert(
+            "keep".to_string(),
+            Provider::with_id(
+                "keep".to_string(),
+                "Keep".to_string(),
+                json!({
+                    "apiKey": "sk-keep",
+                    "baseUrl": "https://keep.example/v1",
+                    "models": [{ "id": "keep-model" }]
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "to-delete".to_string(),
+            Provider::with_id(
+                "to-delete".to_string(),
+                "DeleteOpenClaw".to_string(),
+                json!({
+                    "apiKey": "sk-delete",
+                    "baseUrl": "https://delete.example/v1",
+                    "models": [{ "id": "delete-model" }]
+                }),
+                None,
+            ),
+        );
+    }
+
+    let openclaw_dir = home.join(".openclaw");
+    std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+    let openclaw_path = openclaw_dir.join("openclaw.json");
+    std::fs::write(
+        &openclaw_path,
+        serde_json::to_string_pretty(&json!({
+            "models": {
+                "mode": "merge",
+                "providers": {
+                    "keep": {
+                        "apiKey": "sk-keep",
+                        "baseUrl": "https://keep.example/v1",
+                        "models": [{ "id": "keep-model" }]
+                    },
+                    "to-delete": {
+                        "apiKey": "sk-delete",
+                        "baseUrl": "https://delete.example/v1",
+                        "models": [{ "id": "delete-model" }]
+                    }
+                }
+            }
+        }))
+        .expect("serialize openclaw live config"),
+    )
+    .expect("seed openclaw live config");
+
+    let app_state = state_from_config(config);
+
+    ProviderService::delete(&app_state, AppType::OpenClaw, "to-delete")
+        .expect("delete openclaw provider should succeed");
+
+    let locked = app_state.config.read().expect("lock config after delete");
+    let manager = locked
+        .get_manager(&AppType::OpenClaw)
+        .expect("openclaw manager after delete");
+    assert!(
+        !manager.providers.contains_key("to-delete"),
+        "openclaw provider should be removed from state"
+    );
+    assert!(manager.providers.contains_key("keep"));
+
+    let live_after: serde_json::Value =
+        read_json_file(&openclaw_path).expect("read openclaw live config after delete");
+    assert_eq!(live_after["models"]["mode"], "merge");
+    let providers = live_after["models"]["providers"]
+        .as_object()
+        .expect("openclaw config should contain providers map");
+    assert!(providers.contains_key("keep"));
+    assert!(
+        !providers.contains_key("to-delete"),
+        "deleted openclaw provider should be removed from live config"
+    );
+}
+
+#[test]
+fn provider_service_delete_openclaw_default_provider_removes_provider_like_upstream() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::OpenClaw)
+            .expect("openclaw manager");
+        manager.providers.insert(
+            "keep".to_string(),
+            Provider::with_id(
+                "keep".to_string(),
+                "Keep".to_string(),
+                json!({
+                    "apiKey": "sk-keep",
+                    "baseUrl": "https://keep.example/v1",
+                    "models": [
+                        { "id": "primary-model" },
+                        { "id": "fallback-model" }
+                    ]
+                }),
+                None,
+            ),
+        );
+    }
+
+    let openclaw_dir = home.join(".openclaw");
+    std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+    let openclaw_path = openclaw_dir.join("openclaw.json");
+    std::fs::write(
+        &openclaw_path,
+        serde_json::to_string_pretty(&json!({
+            "models": {
+                "mode": "merge",
+                "providers": {
+                    "keep": {
+                        "apiKey": "sk-keep",
+                        "baseUrl": "https://keep.example/v1",
+                        "models": [
+                            { "id": "primary-model" },
+                            { "id": "fallback-model" }
+                        ]
+                    }
+                }
+            },
+            "agents": {
+                "defaults": {
+                    "model": {
+                        "primary": "keep/fallback-model",
+                        "fallbacks": ["keep/primary-model"]
+                    }
+                }
+            }
+        }))
+        .expect("serialize openclaw live config"),
+    )
+    .expect("seed openclaw live config");
+
+    let app_state = state_from_config(config);
+
+    ProviderService::delete(&app_state, AppType::OpenClaw, "keep")
+        .expect("deleting an OpenClaw provider should follow upstream additive semantics");
+
+    let locked = app_state.config.read().expect("lock config after delete");
+    let manager = locked
+        .get_manager(&AppType::OpenClaw)
+        .expect("openclaw manager after delete");
+    assert!(!manager.providers.contains_key("keep"));
+
+    let live_after: serde_json::Value =
+        read_json_file(&openclaw_path).expect("read openclaw live config after delete");
+    assert_eq!(
+        live_after["agents"]["defaults"]["model"]["primary"],
+        "keep/fallback-model"
+    );
+    assert!(live_after["models"]["providers"].get("keep").is_none());
+}
+
+#[test]
+fn provider_service_delete_openclaw_provider_referenced_only_by_fallback_removes_provider_like_upstream(
+) {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::OpenClaw)
+            .expect("openclaw manager");
+        manager.providers.insert(
+            "keep".to_string(),
+            Provider::with_id(
+                "keep".to_string(),
+                "Keep".to_string(),
+                json!({
+                    "apiKey": "sk-keep",
+                    "baseUrl": "https://keep.example/v1",
+                    "models": [
+                        { "id": "primary-model" },
+                        { "id": "fallback-model" }
+                    ]
+                }),
+                None,
+            ),
+        );
+    }
+
+    let openclaw_dir = home.join(".openclaw");
+    std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+    let openclaw_path = openclaw_dir.join("openclaw.json");
+    std::fs::write(
+        &openclaw_path,
+        serde_json::to_string_pretty(&json!({
+            "models": {
+                "mode": "merge",
+                "providers": {
+                    "keep": {
+                        "apiKey": "sk-keep",
+                        "baseUrl": "https://keep.example/v1",
+                        "models": [
+                            { "id": "primary-model" },
+                            { "id": "fallback-model" }
+                        ]
+                    }
+                }
+            },
+            "agents": {
+                "defaults": {
+                    "model": {
+                        "primary": "other-provider/other-model",
+                        "fallbacks": ["keep/fallback-model"]
+                    }
+                }
+            }
+        }))
+        .expect("serialize openclaw live config"),
+    )
+    .expect("seed openclaw live config");
+
+    let app_state = state_from_config(config);
+
+    ProviderService::delete(&app_state, AppType::OpenClaw, "keep")
+        .expect("deleting fallback-referenced OpenClaw provider should follow upstream semantics");
+
+    let locked = app_state.config.read().expect("lock config after delete");
+    let manager = locked
+        .get_manager(&AppType::OpenClaw)
+        .expect("openclaw manager after delete");
+    assert!(!manager.providers.contains_key("keep"));
+
+    let live_after: serde_json::Value =
+        read_json_file(&openclaw_path).expect("read openclaw live config after delete");
+    assert_eq!(
+        live_after["agents"]["defaults"]["model"]["fallbacks"],
+        json!(["keep/fallback-model"])
+    );
+    assert!(live_after["models"]["providers"].get("keep").is_none());
+}
+
+#[test]
+fn provider_service_switch_openclaw_rolls_back_preserving_original_document_text() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::OpenClaw)
+            .expect("openclaw manager");
+        manager.providers.insert(
+            "keep".to_string(),
+            Provider::with_id(
+                "keep".to_string(),
+                "Keep".to_string(),
+                json!({
+                    "apiKey": "sk-keep",
+                    "baseUrl": "https://keep.example/v1",
+                    "models": [{ "id": "keep-model" }]
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "target".to_string(),
+            Provider::with_id(
+                "target".to_string(),
+                "Target".to_string(),
+                json!({
+                    "apiKey": "sk-target",
+                    "baseUrl": "https://target.example/v1",
+                    "models": [{ "id": "target-model" }]
+                }),
+                None,
+            ),
+        );
+    }
+    config.mcp.servers = Some(HashMap::new());
+    config.mcp.servers.as_mut().unwrap().insert(
+        "broken-opencode".into(),
+        McpServer {
+            id: "broken-opencode".to_string(),
+            name: "Broken OpenCode".to_string(),
+            server: json!({
+                "type": "wat"
+            }),
+            apps: McpApps {
+                claude: false,
+                codex: false,
+                gemini: false,
+                opencode: true,
+            },
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        },
+    );
+
+    let openclaw_dir = home.join(".openclaw");
+    std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+    std::fs::create_dir_all(home.join(".config").join("opencode"))
+        .expect("create opencode dir so MCP sync runs");
+    let openclaw_path = openclaw_dir.join("openclaw.json");
+    let original_text = r#"// keep-this-comment
+{
+  models: {
+    mode: 'merge',
+    providers: {
+      keep: {
+        apiKey: 'sk-keep',
+        baseUrl: 'https://keep.example/v1',
+        models: [{ id: 'keep-model' }],
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      model: {
+        primary: 'keep/keep-model',
+      },
+    },
+  },
+  tools: {
+    profile: 'coding',
+  },
+}
+"#;
+    std::fs::write(&openclaw_path, original_text).expect("seed openclaw json5 live config");
+
+    let state = state_from_config(config);
+
+    let err = ProviderService::switch(&state, AppType::OpenClaw, "target")
+        .expect_err("broken MCP sync should force rollback");
+    match err {
+        AppError::McpValidation(_) | AppError::Config(_) | AppError::Localized { .. } => {}
+        other => panic!("expected MCP/config-related error, got {other:?}"),
+    }
+
+    let live_after = std::fs::read_to_string(&openclaw_path)
+        .expect("read openclaw live config after rolled back switch");
+    assert_eq!(
+        live_after, original_text,
+        "rollback should restore the original JSON5 document text verbatim"
     );
 }
 

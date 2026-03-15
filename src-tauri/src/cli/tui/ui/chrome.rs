@@ -12,7 +12,7 @@ pub(super) fn render_header(
         .constraints([
             Constraint::Length(12),
             Constraint::Min(0),
-            Constraint::Max(44),
+            Constraint::Max(60),
         ])
         .split(area);
 
@@ -34,6 +34,7 @@ pub(super) fn render_header(
         AppType::Codex => 1,
         AppType::Gemini => 2,
         AppType::OpenCode => 3,
+        AppType::OpenClaw => 4,
     };
     let tabs_line = Line::from(vec![
         Span::styled(
@@ -66,6 +67,15 @@ pub(super) fn render_header(
         Span::styled(
             format!(" {} ", AppType::OpenCode.as_str()),
             if selected == 3 {
+                active_chip_style(theme)
+            } else {
+                inactive_chip_style(theme)
+            },
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!(" {} ", AppType::OpenClaw.as_str()),
+            if selected == 4 {
                 active_chip_style(theme)
             } else {
                 inactive_chip_style(theme)

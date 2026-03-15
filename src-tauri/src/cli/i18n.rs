@@ -66,7 +66,7 @@ thread_local! {
 }
 
 #[cfg(test)]
-struct TestLanguageGuard(Option<Language>);
+pub(crate) struct TestLanguageGuard(Option<Language>);
 
 #[cfg(test)]
 impl Drop for TestLanguageGuard {
@@ -78,7 +78,7 @@ impl Drop for TestLanguageGuard {
 }
 
 #[cfg(test)]
-fn use_test_language(lang: Language) -> TestLanguageGuard {
+pub(crate) fn use_test_language(lang: Language) -> TestLanguageGuard {
     let previous = TEST_LANGUAGE_OVERRIDE.with(|slot| slot.replace(Some(lang)));
     TestLanguageGuard(previous)
 }
@@ -1366,6 +1366,130 @@ pub mod texts {
         }
     }
 
+    pub fn tui_label_openclaw_api() -> &'static str {
+        if is_chinese() {
+            "API 协议"
+        } else {
+            "API Mode"
+        }
+    }
+
+    pub fn tui_label_openclaw_user_agent() -> &'static str {
+        if is_chinese() {
+            "发送 User-Agent"
+        } else {
+            "Send User-Agent"
+        }
+    }
+
+    pub fn tui_label_openclaw_models() -> &'static str {
+        if is_chinese() {
+            "模型列表"
+        } else {
+            "Models"
+        }
+    }
+
+    pub fn tui_label_openclaw_status() -> &'static str {
+        if is_chinese() {
+            "状态"
+        } else {
+            "Status"
+        }
+    }
+
+    pub fn tui_label_openclaw_model() -> &'static str {
+        if is_chinese() {
+            "模型"
+        } else {
+            "Model"
+        }
+    }
+
+    pub fn tui_openclaw_status_default() -> &'static str {
+        if is_chinese() {
+            "默认"
+        } else {
+            "default"
+        }
+    }
+
+    pub fn tui_openclaw_status_in_config_and_saved() -> &'static str {
+        if is_chinese() {
+            "配置中 + 已保存"
+        } else {
+            "in config + saved"
+        }
+    }
+
+    pub fn tui_openclaw_status_live_only() -> &'static str {
+        if is_chinese() {
+            "仅当前配置"
+        } else {
+            "live only"
+        }
+    }
+
+    pub fn tui_openclaw_status_saved_only() -> &'static str {
+        if is_chinese() {
+            "仅已保存"
+        } else {
+            "saved only"
+        }
+    }
+
+    pub fn tui_openclaw_status_untracked() -> &'static str {
+        if is_chinese() {
+            "未跟踪"
+        } else {
+            "untracked"
+        }
+    }
+
+    pub fn tui_openclaw_models_summary(total: usize) -> String {
+        if is_chinese() {
+            if total == 0 {
+                "未配置模型".to_string()
+            } else {
+                format!(
+                    "{total} 个模型（1 主模型 + {} 回退）",
+                    total.saturating_sub(1)
+                )
+            }
+        } else if total == 0 {
+            "No models configured".to_string()
+        } else {
+            format!(
+                "{total} models (1 primary + {} fallbacks)",
+                total.saturating_sub(1)
+            )
+        }
+    }
+
+    pub fn tui_openclaw_models_open_hint() -> &'static str {
+        if is_chinese() {
+            "按 Enter 编辑 OpenClaw 模型列表"
+        } else {
+            "Press Enter to edit OpenClaw models"
+        }
+    }
+
+    pub fn tui_openclaw_models_editor_title() -> &'static str {
+        if is_chinese() {
+            "OpenClaw 模型列表"
+        } else {
+            "OpenClaw Models"
+        }
+    }
+
+    pub fn tui_toast_json_must_be_array() -> &'static str {
+        if is_chinese() {
+            "JSON 必须是数组"
+        } else {
+            "JSON must be an array"
+        }
+    }
+
     pub fn tui_label_opencode_model_id() -> &'static str {
         if is_chinese() {
             "主模型 ID"
@@ -1711,6 +1835,22 @@ pub mod texts {
             "切换"
         } else {
             "switch"
+        }
+    }
+
+    pub fn tui_key_add_remove() -> &'static str {
+        if is_chinese() {
+            "添加/移除"
+        } else {
+            "add/remove"
+        }
+    }
+
+    pub fn tui_key_set_default() -> &'static str {
+        if is_chinese() {
+            "设为默认"
+        } else {
+            "set default"
         }
     }
 
@@ -2930,6 +3070,46 @@ pub mod texts {
             "不能删除当前供应商。"
         } else {
             "Cannot delete current provider."
+        }
+    }
+
+    pub fn tui_toast_provider_cannot_remove_default_model() -> &'static str {
+        if is_chinese() {
+            "被当前默认模型引用的供应商不能直接从配置中移除。"
+        } else {
+            "A provider referenced by the current default model cannot be removed from config directly."
+        }
+    }
+
+    pub fn tui_toast_provider_default_requires_live_config() -> &'static str {
+        if is_chinese() {
+            "请先将该供应商添加到配置中，再设为默认。"
+        } else {
+            "Add this provider to config before setting it as default."
+        }
+    }
+
+    pub fn tui_toast_provider_default_model_missing() -> &'static str {
+        if is_chinese() {
+            "该供应商缺少可设为默认的主模型。"
+        } else {
+            "This provider has no primary model to set as default."
+        }
+    }
+
+    pub fn tui_toast_provider_removed_from_config() -> &'static str {
+        if is_chinese() {
+            "已从当前 OpenClaw 配置中移除该供应商。"
+        } else {
+            "Provider removed from the current OpenClaw config."
+        }
+    }
+
+    pub fn tui_toast_provider_set_as_default(model: &str) -> String {
+        if is_chinese() {
+            format!("已设为默认模型: {}", model)
+        } else {
+            format!("Set default model: {}", model)
         }
     }
 
@@ -7177,6 +7357,22 @@ mod tests {
             texts::tui_proxy_dashboard_manual_routing_copy("Claude"),
             "手动路由：Claude 的流量会通过 cc-switch。"
         );
+    }
+
+    #[test]
+    fn openclaw_provider_status_copy_is_fully_localized_in_chinese() {
+        let _lang = use_test_language(Language::Chinese);
+
+        assert_eq!(texts::tui_label_openclaw_status(), "状态");
+        assert_eq!(texts::tui_label_openclaw_model(), "模型");
+        assert_eq!(texts::tui_openclaw_status_default(), "默认");
+        assert_eq!(
+            texts::tui_openclaw_status_in_config_and_saved(),
+            "配置中 + 已保存"
+        );
+        assert_eq!(texts::tui_openclaw_status_live_only(), "仅当前配置");
+        assert_eq!(texts::tui_openclaw_status_saved_only(), "仅已保存");
+        assert_eq!(texts::tui_openclaw_status_untracked(), "未跟踪");
     }
 
     #[test]

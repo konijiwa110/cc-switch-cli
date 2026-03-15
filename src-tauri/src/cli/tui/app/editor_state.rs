@@ -10,6 +10,7 @@ pub enum EditorKind {
 pub enum EditorSubmit {
     PromptEdit { id: String },
     ProviderFormApplyJson,
+    ProviderFormApplyOpenClawModels,
     ProviderFormApplyCodexAuth,
     ProviderFormApplyCodexConfigToml,
     ProviderAdd,

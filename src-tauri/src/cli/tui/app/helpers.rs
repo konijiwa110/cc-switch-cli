@@ -42,6 +42,10 @@ pub(crate) fn visible_providers<'a>(
         .collect()
 }
 
+pub(crate) fn supports_provider_stream_check(app_type: &AppType) -> bool {
+    !matches!(app_type, AppType::OpenClaw)
+}
+
 pub(crate) fn visible_mcp<'a>(
     filter: &FilterState,
     data: &'a UiData,
@@ -214,11 +218,13 @@ pub(crate) fn cycle_app_type(current: &AppType, dir: i8) -> AppType {
         (AppType::Claude, 1) => AppType::Codex,
         (AppType::Codex, 1) => AppType::Gemini,
         (AppType::Gemini, 1) => AppType::OpenCode,
-        (AppType::OpenCode, 1) => AppType::Claude,
-        (AppType::Claude, -1) => AppType::OpenCode,
+        (AppType::OpenCode, 1) => AppType::OpenClaw,
+        (AppType::OpenClaw, 1) => AppType::Claude,
+        (AppType::Claude, -1) => AppType::OpenClaw,
         (AppType::Codex, -1) => AppType::Claude,
         (AppType::Gemini, -1) => AppType::Codex,
         (AppType::OpenCode, -1) => AppType::Gemini,
+        (AppType::OpenClaw, -1) => AppType::OpenCode,
         (other, _) => other.clone(),
     }
 }
@@ -229,6 +235,7 @@ pub(crate) fn app_type_picker_index(app_type: &AppType) -> usize {
         AppType::Codex => 1,
         AppType::Gemini => 2,
         AppType::OpenCode => 3,
+        AppType::OpenClaw => 4,
     }
 }
 
@@ -237,6 +244,7 @@ pub(crate) fn app_type_for_picker_index(index: usize) -> AppType {
         1 => AppType::Codex,
         2 => AppType::Gemini,
         3 => AppType::OpenCode,
+        4 => AppType::OpenClaw,
         _ => AppType::Claude,
     }
 }

@@ -1,3 +1,5 @@
+mod codex_toml;
+
 use std::{
     collections::HashMap,
     future::Future,
@@ -537,7 +539,7 @@ impl ProxyService {
                             .and_then(Value::as_str)
                             .is_some_and(|value| value == PROXY_TOKEN_PLACEHOLDER)
                     });
-                    Some(Self::is_loopback_proxy_url(base_url) && has_placeholder)
+                    Some(codex_toml::is_loopback_proxy_url(base_url) && has_placeholder)
                 })
                 .unwrap_or(false),
             AppType::Codex => self
@@ -552,7 +554,7 @@ impl ProxyService {
                     let points_to_proxy = live
                         .get("config")
                         .and_then(Value::as_str)
-                        .is_some_and(Self::contains_loopback_proxy_url);
+                        .is_some_and(codex_toml::contains_loopback_proxy_url);
                     has_placeholder && points_to_proxy
                 })
                 .unwrap_or(false),
@@ -566,7 +568,7 @@ impl ProxyService {
                         .get("GEMINI_API_KEY")
                         .and_then(Value::as_str)
                         .is_some_and(|value| value == PROXY_TOKEN_PLACEHOLDER);
-                    Some(Self::is_loopback_proxy_url(base_url) && has_placeholder)
+                    Some(codex_toml::is_loopback_proxy_url(base_url) && has_placeholder)
                 })
                 .unwrap_or(false),
             _ => false,
@@ -905,7 +907,7 @@ impl ProxyService {
                     .to_string();
                 root.insert(
                     "config".to_string(),
-                    json!(Self::update_toml_base_url(
+                    json!(codex_toml::update_toml_base_url(
                         &config_text,
                         proxy_codex_base_url
                     )),
@@ -977,7 +979,7 @@ impl ProxyService {
                     if env
                         .get("ANTHROPIC_BASE_URL")
                         .and_then(Value::as_str)
-                        .is_some_and(Self::is_loopback_proxy_url)
+                        .is_some_and(codex_toml::is_loopback_proxy_url)
                     {
                         env.remove("ANTHROPIC_BASE_URL");
                     }
@@ -1010,7 +1012,8 @@ impl ProxyService {
                 }
 
                 if let Some(config_text) = live.get("config").and_then(Value::as_str) {
-                    live["config"] = json!(Self::remove_loopback_base_url_from_toml(config_text));
+                    live["config"] =
+                        json!(codex_toml::remove_loopback_base_url_from_toml(config_text));
                 }
             }
             AppType::Gemini => {
@@ -1018,7 +1021,7 @@ impl ProxyService {
                     if env
                         .get("GOOGLE_GEMINI_BASE_URL")
                         .and_then(Value::as_str)
-                        .is_some_and(Self::is_loopback_proxy_url)
+                        .is_some_and(codex_toml::is_loopback_proxy_url)
                     {
                         env.remove("GOOGLE_GEMINI_BASE_URL");
                     }
@@ -1379,86 +1382,6 @@ impl ProxyService {
         write_gemini_env_atomic(&env).map_err(|error| format!("write Gemini .env failed: {error}"))
     }
 
-    fn update_toml_base_url(toml_str: &str, new_url: &str) -> String {
-        use toml_edit::DocumentMut;
-
-        let mut doc = match toml_str.parse::<DocumentMut>() {
-            Ok(doc) => doc,
-            Err(_) => return toml_str.to_string(),
-        };
-
-        let model_provider = doc
-            .get("model_provider")
-            .and_then(|item| item.as_str())
-            .map(str::to_string);
-
-        if let Some(provider_key) = model_provider {
-            if doc.get("model_providers").is_none() {
-                doc["model_providers"] = toml_edit::table();
-            }
-
-            if let Some(model_providers) = doc["model_providers"].as_table_mut() {
-                if !model_providers.contains_key(&provider_key) {
-                    model_providers[&provider_key] = toml_edit::table();
-                }
-
-                if let Some(provider_table) = model_providers[&provider_key].as_table_mut() {
-                    provider_table["base_url"] = toml_edit::value(new_url);
-                    return doc.to_string();
-                }
-            }
-        }
-
-        doc["base_url"] = toml_edit::value(new_url);
-        doc.to_string()
-    }
-
-    fn remove_loopback_base_url_from_toml(toml_str: &str) -> String {
-        use toml_edit::DocumentMut;
-
-        let mut doc = match toml_str.parse::<DocumentMut>() {
-            Ok(doc) => doc,
-            Err(_) => return toml_str.to_string(),
-        };
-
-        let model_provider = doc
-            .get("model_provider")
-            .and_then(|item| item.as_str())
-            .map(str::to_string);
-
-        if let Some(provider_key) = model_provider {
-            if let Some(base_url) = doc
-                .get("model_providers")
-                .and_then(|item| item.as_table_like())
-                .and_then(|table| table.get(&provider_key))
-                .and_then(|item| item.as_table_like())
-                .and_then(|table| table.get("base_url"))
-                .and_then(|item| item.as_str())
-            {
-                if Self::contains_loopback_proxy_url(base_url) {
-                    if let Some(section) = doc
-                        .get_mut("model_providers")
-                        .and_then(|item| item.as_table_like_mut())
-                        .and_then(|table| table.get_mut(&provider_key))
-                        .and_then(|item| item.as_table_like_mut())
-                    {
-                        section.remove("base_url");
-                    }
-                }
-            }
-        }
-
-        if doc
-            .get("base_url")
-            .and_then(|item| item.as_str())
-            .is_some_and(Self::contains_loopback_proxy_url)
-        {
-            doc.as_table_mut().remove("base_url");
-        }
-
-        doc.to_string()
-    }
-
     fn takeover_app_from_str(app_type: &str) -> Result<AppType, String> {
         match app_type {
             "claude" => Ok(AppType::Claude),
@@ -1466,13 +1389,5 @@ impl ProxyService {
             "gemini" => Ok(AppType::Gemini),
             _ => Err(format!("proxy takeover not supported for app: {app_type}")),
         }
-    }
-
-    fn is_loopback_proxy_url(url: &str) -> bool {
-        url.contains("127.0.0.1") || url.contains("localhost") || url.contains("[::1]")
-    }
-
-    fn contains_loopback_proxy_url(text: &str) -> bool {
-        text.contains("127.0.0.1") || text.contains("localhost") || text.contains("[::1]")
     }
 }

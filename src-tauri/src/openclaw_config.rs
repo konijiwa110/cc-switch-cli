@@ -218,7 +218,7 @@ impl OpenClawConfigDocument {
             .unwrap_or_default();
         let entry_separator_ws = derive_entry_separator(&leading_ws);
         let child_indent = extract_trailing_indent(&leading_ws);
-        let new_value = value_to_rt_value(value, &child_indent)?;
+        let new_value = value_to_rt_value(key, value, &child_indent)?;
 
         if let Some(existing) = key_value_pairs
             .iter_mut()
@@ -305,68 +305,12 @@ impl OpenClawConfigDocument {
             warnings,
         })
     }
-
-    fn remove_last_provider_preserving_models_section(&mut self, provider_id: &str) -> bool {
-        let Some(models_value) = find_object_value_mut(&mut self.text.value, "models") else {
-            return false;
-        };
-        let Some(providers_value) = find_object_value_mut(models_value, "providers") else {
-            return false;
-        };
-        let Some(provider_pairs) = object_pairs_mut(providers_value) else {
-            return false;
-        };
-
-        let Some(index) = provider_pairs
-            .iter()
-            .position(|pair| json5_key_name(&pair.key) == Some(provider_id))
-        else {
-            return false;
-        };
-
-        if provider_pairs.len() != 1 {
-            return false;
-        }
-
-        provider_pairs.remove(index);
-        set_empty_object_compact(providers_value);
-        true
-    }
 }
 
 fn write_root_section(section: &str, value: &Value) -> Result<OpenClawWriteOutcome, AppError> {
     let mut document = OpenClawConfigDocument::load()?;
     document.set_root_section(section, value)?;
     document.save()
-}
-
-fn object_pairs_mut(value: &mut RtJSONValue) -> Option<&mut Vec<RtJSONKeyValuePair>> {
-    match value {
-        RtJSONValue::JSONObject {
-            key_value_pairs, ..
-        } => Some(key_value_pairs),
-        _ => None,
-    }
-}
-
-fn find_object_value_mut<'a>(value: &'a mut RtJSONValue, key: &str) -> Option<&'a mut RtJSONValue> {
-    object_pairs_mut(value)?
-        .iter_mut()
-        .find(|pair| json5_key_name(&pair.key) == Some(key))
-        .map(|pair| &mut pair.value)
-}
-
-fn set_empty_object_compact(value: &mut RtJSONValue) {
-    if let RtJSONValue::JSONObject {
-        key_value_pairs,
-        context,
-    } = value
-    {
-        key_value_pairs.clear();
-        *context = Some(RtJSONObjectContext {
-            wsc: (String::new(),),
-        });
-    }
 }
 
 fn create_openclaw_backup(source: &str) -> Result<PathBuf, AppError> {
@@ -473,36 +417,115 @@ fn derive_entry_separator(leading_ws: &str) -> String {
     String::new()
 }
 
-fn contains_empty_object(value: &Value) -> bool {
-    match value {
-        Value::Object(map) => map.is_empty() || map.values().any(contains_empty_object),
-        Value::Array(items) => items.iter().any(contains_empty_object),
-        _ => false,
+fn should_use_precise_empty_object_fallback(section: &str, value: &Value) -> bool {
+    section == "models"
+        && value
+            .as_object()
+            .and_then(|models| models.get("providers"))
+            .and_then(Value::as_object)
+            .map(|providers| providers.is_empty())
+            .unwrap_or(false)
+}
+
+fn serialize_json5_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '\'' => escaped.push_str("\\'"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\u{08}' => escaped.push_str("\\b"),
+            '\u{0C}' => escaped.push_str("\\f"),
+            ch if ch.is_control() => {
+                let code = ch as u32;
+                escaped.push_str(&format!("\\u{:04X}", code));
+            }
+            ch => escaped.push(ch),
+        }
+    }
+
+    format!("'{escaped}'")
+}
+
+fn serialize_json5_key(key: &str) -> String {
+    if is_identifier_key(key) {
+        key.to_string()
+    } else {
+        serialize_json5_string(key)
     }
 }
 
-fn serialize_section_value(value: &Value) -> Result<String, AppError> {
-    if contains_empty_object(value) {
-        return serde_json::to_string_pretty(value)
-            .map_err(|source| AppError::JsonSerialize { source });
-    }
+fn serialize_json5_value(value: &Value, indent_level: usize) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(flag) => flag.to_string(),
+        Value::Number(number) => number.to_string(),
+        Value::String(text) => serialize_json5_string(text),
+        Value::Array(items) => {
+            if items.is_empty() {
+                return "[]".to_string();
+            }
 
-    match json_five::to_string_formatted(
-        value,
-        FormatConfiguration::with_indent(2, TrailingComma::NONE),
-    ) {
-        Ok(source) => Ok(source),
-        Err(err) => {
-            log::warn!(
-                "json-five failed to serialize OpenClaw section, falling back to JSON writer: {err}"
-            );
-            serde_json::to_string_pretty(value).map_err(|source| AppError::JsonSerialize { source })
+            let current_indent = "  ".repeat(indent_level);
+            let child_indent = "  ".repeat(indent_level + 1);
+            let mut output = String::from("[\n");
+            for (index, item) in items.iter().enumerate() {
+                output.push_str(&child_indent);
+                output.push_str(&serialize_json5_value(item, indent_level + 1));
+                if index + 1 != items.len() {
+                    output.push(',');
+                }
+                output.push('\n');
+            }
+            output.push_str(&current_indent);
+            output.push(']');
+            output
+        }
+        Value::Object(map) => {
+            if map.is_empty() {
+                return "{}".to_string();
+            }
+
+            let current_indent = "  ".repeat(indent_level);
+            let child_indent = "  ".repeat(indent_level + 1);
+            let mut output = String::from("{\n");
+            for (index, (key, item)) in map.iter().enumerate() {
+                output.push_str(&child_indent);
+                output.push_str(&serialize_json5_key(key));
+                output.push_str(": ");
+                output.push_str(&serialize_json5_value(item, indent_level + 1));
+                if index + 1 != map.len() {
+                    output.push(',');
+                }
+                output.push('\n');
+            }
+            output.push_str(&current_indent);
+            output.push('}');
+            output
         }
     }
 }
 
-fn value_to_rt_value(value: &Value, parent_indent: &str) -> Result<RtJSONValue, AppError> {
-    let source = serialize_section_value(value)?;
+fn serialize_section_value(section: &str, value: &Value) -> Result<String, AppError> {
+    if should_use_precise_empty_object_fallback(section, value) {
+        return Ok(serialize_json5_value(value, 0));
+    }
+
+    json_five::to_string_formatted(
+        value,
+        FormatConfiguration::with_indent(2, TrailingComma::NONE),
+    )
+    .map_err(|e| AppError::Config(format!("Failed to serialize JSON5 section: {e}")))
+}
+
+fn value_to_rt_value(
+    section: &str,
+    value: &Value,
+    parent_indent: &str,
+) -> Result<RtJSONValue, AppError> {
+    let source = serialize_section_value(section, value)?;
 
     let adjusted = reindent_json5_block(&source, parent_indent);
     let text = rt_from_str(&adjusted).map_err(|e| {
@@ -694,20 +717,6 @@ pub fn remove_provider(id: &str) -> Result<OpenClawWriteOutcome, AppError> {
 
     if !removed {
         return Ok(OpenClawWriteOutcome::default());
-    }
-
-    let removed_last_provider = config
-        .get("models")
-        .and_then(|models| models.get("providers"))
-        .and_then(Value::as_object)
-        .map(|providers| providers.is_empty())
-        .unwrap_or(false);
-
-    if removed_last_provider {
-        let mut document = OpenClawConfigDocument::load()?;
-        if document.remove_last_provider_preserving_models_section(id) {
-            return document.save();
-        }
     }
 
     let models_value = config.get("models").cloned().unwrap_or_else(|| {
@@ -1140,7 +1149,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn remove_last_provider_preserves_models_section_source_text() {
+    fn remove_last_provider_rewrites_models_section_like_upstream() {
         let _guard = lock_test_mutex();
         let dir = tempdir().expect("create tempdir");
         let _settings = SettingsGuard::with_openclaw_dir(dir.path());
@@ -1178,17 +1187,66 @@ mod tests {
             "models.mode formatting should stay JSON5-style: {written}"
         );
         assert!(
-            written.contains("// preserve providers comment"),
-            "models.providers comment should survive last-provider removal: {written}"
+            !written.contains("// preserve providers comment"),
+            "rewriting the models subtree should drop providers-level comments like upstream: {written}"
         );
         assert!(
             written.contains("providers: {}"),
-            "providers map should become an empty object without rewriting the section style: {written}"
+            "providers map should become an empty object after rewrite: {written}"
         );
         assert!(
             written.contains("profile: 'coding'"),
             "unrelated sections should preserve existing source text: {written}"
         );
+    }
+
+    #[test]
+    fn empty_object_fallback_only_targets_models_with_empty_providers() {
+        let models_value = json!({
+            "mode": "merge",
+            "providers": {}
+        });
+        let env_value = json!({
+            "vars": {}
+        });
+        let models_with_other_empty_object = json!({
+            "mode": "merge",
+            "providers": {
+                "demo": {
+                    "headers": {}
+                }
+            }
+        });
+
+        assert!(should_use_precise_empty_object_fallback(
+            "models",
+            &models_value
+        ));
+        assert!(!should_use_precise_empty_object_fallback("env", &env_value));
+        assert!(!should_use_precise_empty_object_fallback(
+            "models",
+            &models_with_other_empty_object
+        ));
+    }
+
+    #[test]
+    fn serialize_section_value_uses_standard_formatter_outside_precise_fallback_shape() {
+        let env_value = json!({
+            "vars": {
+                "TOKEN": "value"
+            }
+        });
+
+        let expected = json_five::to_string_formatted(
+            &env_value,
+            FormatConfiguration::with_indent(2, TrailingComma::NONE),
+        )
+        .expect("standard formatter should handle non-fallback shape");
+
+        let actual = serialize_section_value("env", &env_value)
+            .expect("serialize non-fallback shape should succeed");
+
+        assert_eq!(actual, expected);
     }
 
     #[test]

@@ -3,6 +3,10 @@ use serde_json::{json, Value};
 use crate::app_config::{AppType, McpServer};
 use crate::cli::i18n::texts;
 use crate::error::AppError;
+use crate::openclaw_config::{
+    set_agents_defaults, set_env_config, set_tools_config, OpenClawAgentsDefaults,
+    OpenClawEnvConfig, OpenClawToolsConfig,
+};
 use crate::provider::Provider;
 use crate::services::{McpService, PromptService, ProviderService};
 use crate::settings::{set_webdav_sync_settings, WebDavSyncSettings};
@@ -43,8 +47,86 @@ pub(super) fn submit(
         EditorSubmit::ConfigCommonSnippet { app_type } => {
             submit_config_common_snippet(ctx, app_type, content)
         }
+        EditorSubmit::ConfigOpenClawEnv => submit_openclaw_env(ctx, content),
+        EditorSubmit::ConfigOpenClawTools => submit_openclaw_tools(ctx, content),
+        EditorSubmit::ConfigOpenClawAgents => submit_openclaw_agents(ctx, content),
         EditorSubmit::ConfigWebDavSettings => submit_webdav_settings(ctx, content),
     }
+}
+
+fn submit_openclaw_env(
+    ctx: &mut RuntimeActionContext<'_>,
+    content: String,
+) -> Result<(), AppError> {
+    let env: OpenClawEnvConfig = match serde_json::from_str(&content) {
+        Ok(env) => env,
+        Err(err) => {
+            ctx.app.push_toast(
+                texts::tui_toast_invalid_json(&err.to_string()),
+                ToastKind::Error,
+            );
+            return Ok(());
+        }
+    };
+
+    set_env_config(&env)?;
+    ctx.app.editor = None;
+    ctx.app.push_toast(
+        texts::tui_toast_openclaw_config_saved(texts::tui_config_item_openclaw_env()),
+        ToastKind::Success,
+    );
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    Ok(())
+}
+
+fn submit_openclaw_tools(
+    ctx: &mut RuntimeActionContext<'_>,
+    content: String,
+) -> Result<(), AppError> {
+    let tools: OpenClawToolsConfig = match serde_json::from_str(&content) {
+        Ok(tools) => tools,
+        Err(err) => {
+            ctx.app.push_toast(
+                texts::tui_toast_invalid_json(&err.to_string()),
+                ToastKind::Error,
+            );
+            return Ok(());
+        }
+    };
+
+    set_tools_config(&tools)?;
+    ctx.app.editor = None;
+    ctx.app.push_toast(
+        texts::tui_toast_openclaw_config_saved(texts::tui_config_item_openclaw_tools()),
+        ToastKind::Success,
+    );
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    Ok(())
+}
+
+fn submit_openclaw_agents(
+    ctx: &mut RuntimeActionContext<'_>,
+    content: String,
+) -> Result<(), AppError> {
+    let defaults: OpenClawAgentsDefaults = match serde_json::from_str(&content) {
+        Ok(defaults) => defaults,
+        Err(err) => {
+            ctx.app.push_toast(
+                texts::tui_toast_invalid_json(&err.to_string()),
+                ToastKind::Error,
+            );
+            return Ok(());
+        }
+    };
+
+    set_agents_defaults(&defaults)?;
+    ctx.app.editor = None;
+    ctx.app.push_toast(
+        texts::tui_toast_openclaw_config_saved(texts::tui_config_item_openclaw_agents_defaults()),
+        ToastKind::Success,
+    );
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    Ok(())
 }
 
 fn submit_prompt_edit(
@@ -546,4 +628,534 @@ fn submit_webdav_settings(
         .push_toast(texts::tui_toast_webdav_settings_saved(), ToastKind::Success);
     *ctx.data = UiData::load(&ctx.app.app_type)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use serial_test::serial;
+    use std::collections::HashMap;
+    use std::path::Path;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use tempfile::tempdir;
+
+    use crate::app_config::AppType;
+    use crate::cli::tui::app::{Action, App, Focus};
+    use crate::cli::tui::route::Route;
+    use crate::cli::tui::runtime_systems::RequestTracker;
+    use crate::cli::tui::terminal::TuiTerminal;
+    use crate::openclaw_config::{write_openclaw_config_source, OpenClawModelCatalogEntry};
+    use crate::settings::{get_settings, update_settings, AppSettings};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    fn test_mutex() -> &'static Mutex<()> {
+        static MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+        MUTEX.get_or_init(|| Mutex::new(()))
+    }
+
+    fn lock_test_mutex() -> MutexGuard<'static, ()> {
+        test_mutex()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    struct HomeGuard {
+        old_home: Option<std::ffi::OsString>,
+        old_userprofile: Option<std::ffi::OsString>,
+    }
+
+    impl HomeGuard {
+        fn set(home: &Path) -> Self {
+            let old_home = std::env::var_os("HOME");
+            let old_userprofile = std::env::var_os("USERPROFILE");
+            std::env::set_var("HOME", home);
+            std::env::set_var("USERPROFILE", home);
+            Self {
+                old_home,
+                old_userprofile,
+            }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.old_home.take() {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match self.old_userprofile.take() {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+        }
+    }
+
+    struct SettingsGuard {
+        previous: AppSettings,
+    }
+
+    impl SettingsGuard {
+        fn with_openclaw_dir(path: &Path) -> Self {
+            let previous = get_settings();
+            let mut settings = AppSettings::default();
+            settings.openclaw_config_dir = Some(path.display().to_string());
+            update_settings(settings).expect("set openclaw override dir");
+            Self { previous }
+        }
+    }
+
+    impl Drop for SettingsGuard {
+        fn drop(&mut self) {
+            update_settings(self.previous.clone()).expect("restore previous settings");
+        }
+    }
+
+    fn run_openclaw_editor_submit_flow(
+        route: Route,
+        open_key: KeyEvent,
+        initial_source: &str,
+        expected_submit: EditorSubmit,
+        expected_initial_warning: &str,
+        edited_content: &str,
+    ) -> Result<(App, UiData), AppError> {
+        let _lock = lock_test_mutex();
+        let home_dir = tempdir().expect("create temp home");
+        let openclaw_dir = tempdir().expect("create temp openclaw dir");
+        let _home = HomeGuard::set(home_dir.path());
+        let _settings = SettingsGuard::with_openclaw_dir(openclaw_dir.path());
+
+        write_openclaw_config_source(initial_source)?;
+
+        let mut terminal = TuiTerminal::new_for_test()?;
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = route;
+        app.focus = Focus::Content;
+        let mut data = UiData::load(&AppType::OpenClaw)?;
+        assert!(data
+            .config
+            .openclaw_warnings
+            .as_ref()
+            .is_some_and(|warnings| warnings
+                .iter()
+                .any(|warning| warning.code == expected_initial_warning)));
+
+        let open_action = app.on_key(open_key, &data);
+        assert!(matches!(open_action, Action::None));
+        assert!(matches!(
+            app.editor.as_ref().map(|editor| editor.submit.clone()),
+            Some(submit) if submit == expected_submit
+        ));
+
+        app.editor
+            .as_mut()
+            .expect("editor should be open")
+            .replace_text(edited_content);
+
+        let submit_action = app.on_key(ctrl(KeyCode::Char('s')), &data);
+        let Action::EditorSubmit { submit, content } = submit_action else {
+            panic!("expected EditorSubmit action");
+        };
+
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut terminal,
+            app: &mut app,
+            data: &mut data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut webdav_loading,
+            update_req_tx: None,
+            update_check: &mut update_check,
+            model_fetch_req_tx: None,
+        };
+
+        super::submit(&mut ctx, submit, content)?;
+        Ok((app, data))
+    }
+
+    fn run_openclaw_config_menu_submit_flow(
+        item: crate::cli::tui::app::ConfigItem,
+        expected_route: Route,
+        editor_open_key: KeyEvent,
+        initial_source: &str,
+        expected_submit: EditorSubmit,
+        expected_initial_warning: &str,
+        edited_content: &str,
+    ) -> Result<(App, UiData), AppError> {
+        let _lock = lock_test_mutex();
+        let home_dir = tempdir().expect("create temp home");
+        let openclaw_dir = tempdir().expect("create temp openclaw dir");
+        let _home = HomeGuard::set(home_dir.path());
+        let _settings = SettingsGuard::with_openclaw_dir(openclaw_dir.path());
+
+        write_openclaw_config_source(initial_source)?;
+
+        let mut terminal = TuiTerminal::new_for_test()?;
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::Config;
+        app.focus = Focus::Content;
+        app.config_idx = crate::cli::tui::app::ConfigItem::ALL
+            .iter()
+            .filter(|candidate| candidate.visible_for_app(&app.app_type))
+            .position(|candidate| *candidate == item)
+            .expect("OpenClaw config item should be visible in config menu");
+        let mut data = UiData::load(&AppType::OpenClaw)?;
+        assert!(data
+            .config
+            .openclaw_warnings
+            .as_ref()
+            .is_some_and(|warnings| warnings
+                .iter()
+                .any(|warning| warning.code == expected_initial_warning)));
+
+        let route_action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(route_action, Action::SwitchRoute(actual) if actual == expected_route));
+        assert_eq!(app.route, expected_route);
+
+        let open_action = app.on_key(editor_open_key, &data);
+        assert!(matches!(open_action, Action::None));
+        assert!(matches!(
+            app.editor.as_ref().map(|editor| editor.submit.clone()),
+            Some(submit) if submit == expected_submit
+        ));
+
+        app.editor
+            .as_mut()
+            .expect("editor should be open")
+            .replace_text(edited_content);
+
+        let submit_action = app.on_key(ctrl(KeyCode::Char('s')), &data);
+        let Action::EditorSubmit { submit, content } = submit_action else {
+            panic!("expected EditorSubmit action");
+        };
+
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut terminal,
+            app: &mut app,
+            data: &mut data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut webdav_loading,
+            update_req_tx: None,
+            update_check: &mut update_check,
+            model_fetch_req_tx: None,
+        };
+
+        super::submit(&mut ctx, submit, content)?;
+        Ok((app, data))
+    }
+
+    #[test]
+    #[serial]
+    fn openclaw_config_route_env_editor_submit_saves_and_reloads_ui_data() {
+        let initial_source = r#"{
+  env: {
+    vars: 'broken-env',
+  },
+}"#;
+        let edited_content = r#"{
+  "OPENCLAW_ENV_TOKEN": "fresh-token",
+  "OPENCLAW_TIMEOUT": 30
+}"#;
+
+        let (app, data) = run_openclaw_editor_submit_flow(
+            Route::ConfigOpenClawEnv,
+            key(KeyCode::Enter),
+            initial_source,
+            EditorSubmit::ConfigOpenClawEnv,
+            "stringified_env_vars",
+            edited_content,
+        )
+        .expect("env submit flow should succeed");
+
+        assert!(app.editor.is_none());
+        assert_eq!(
+            app.toast.as_ref().map(|toast| toast.message.as_str()),
+            Some(
+                texts::tui_toast_openclaw_config_saved(texts::tui_config_item_openclaw_env())
+                    .as_str()
+            )
+        );
+        assert_eq!(
+            data.config
+                .openclaw_env
+                .as_ref()
+                .and_then(|env| env.vars.get("OPENCLAW_ENV_TOKEN")),
+            Some(&Value::String("fresh-token".to_string()))
+        );
+        let warnings = data.config.openclaw_warnings.clone().unwrap_or_default();
+        assert!(!warnings
+            .iter()
+            .any(|warning| warning.code == "stringified_env_vars"));
+    }
+
+    #[test]
+    #[serial]
+    fn openclaw_config_route_tools_editor_submit_saves_and_reloads_ui_data() {
+        let initial_source = r#"{
+  tools: {
+    profile: 'dangerous',
+    allow: ['Read'],
+  },
+}"#;
+        let edited_content = r#"{
+  "profile": "coding",
+  "allow": ["Read", "Write"],
+  "deny": ["Bash"]
+}"#;
+
+        let (app, data) = run_openclaw_editor_submit_flow(
+            Route::ConfigOpenClawTools,
+            key(KeyCode::Char('e')),
+            initial_source,
+            EditorSubmit::ConfigOpenClawTools,
+            "invalid_tools_profile",
+            edited_content,
+        )
+        .expect("tools submit flow should succeed");
+
+        assert!(app.editor.is_none());
+        assert_eq!(
+            app.toast.as_ref().map(|toast| toast.message.as_str()),
+            Some(
+                texts::tui_toast_openclaw_config_saved(texts::tui_config_item_openclaw_tools())
+                    .as_str()
+            )
+        );
+        assert_eq!(
+            data.config
+                .openclaw_tools
+                .as_ref()
+                .and_then(|tools| tools.profile.as_deref()),
+            Some("coding")
+        );
+        assert_eq!(
+            data.config
+                .openclaw_tools
+                .as_ref()
+                .map(|tools| tools.allow.clone()),
+            Some(vec!["Read".to_string(), "Write".to_string()])
+        );
+        let warnings = data.config.openclaw_warnings.clone().unwrap_or_default();
+        assert!(!warnings
+            .iter()
+            .any(|warning| warning.code == "invalid_tools_profile"));
+    }
+
+    #[test]
+    #[serial]
+    fn openclaw_config_route_agents_editor_submit_saves_and_reloads_ui_data() {
+        let initial_source = r#"{
+  agents: {
+    defaults: {
+      timeout: 42,
+      model: {
+        primary: 'legacy-model',
+      },
+    },
+  },
+}"#;
+        let edited_content = r#"{
+  "model": {
+    "primary": "gpt-4.1",
+    "fallbacks": ["gpt-4o-mini"]
+  },
+  "models": {
+    "gpt-4.1": {
+      "alias": "General"
+    }
+  }
+}"#;
+
+        let (app, data) = run_openclaw_editor_submit_flow(
+            Route::ConfigOpenClawAgents,
+            key(KeyCode::Enter),
+            initial_source,
+            EditorSubmit::ConfigOpenClawAgents,
+            "legacy_agents_timeout",
+            edited_content,
+        )
+        .expect("agents submit flow should succeed");
+
+        assert!(app.editor.is_none());
+        assert_eq!(
+            app.toast.as_ref().map(|toast| toast.message.as_str()),
+            Some(
+                texts::tui_toast_openclaw_config_saved(
+                    texts::tui_config_item_openclaw_agents_defaults()
+                )
+                .as_str()
+            )
+        );
+        assert_eq!(
+            data.config
+                .openclaw_agents_defaults
+                .as_ref()
+                .and_then(|defaults| defaults.model.as_ref())
+                .map(|model| model.primary.as_str()),
+            Some("gpt-4.1")
+        );
+        assert_eq!(
+            data.config
+                .openclaw_agents_defaults
+                .as_ref()
+                .and_then(|defaults| defaults.models.as_ref())
+                .and_then(|models| models.get("gpt-4.1")),
+            Some(&OpenClawModelCatalogEntry {
+                alias: Some("General".to_string()),
+                extra: HashMap::new(),
+            })
+        );
+        let warnings = data.config.openclaw_warnings.clone().unwrap_or_default();
+        assert!(!warnings
+            .iter()
+            .any(|warning| warning.code == "legacy_agents_timeout"));
+    }
+
+    #[test]
+    #[serial]
+    fn openclaw_config_route_env_entry_from_config_menu_saves_and_clears_warning() {
+        let initial_source = r#"{
+  env: {
+    vars: 'broken-env',
+  },
+}"#;
+        let edited_content = r#"{
+  "OPENCLAW_ENV_TOKEN": "fresh-token"
+}"#;
+
+        let (app, data) = run_openclaw_config_menu_submit_flow(
+            crate::cli::tui::app::ConfigItem::OpenClawEnv,
+            Route::ConfigOpenClawEnv,
+            key(KeyCode::Enter),
+            initial_source,
+            EditorSubmit::ConfigOpenClawEnv,
+            "stringified_env_vars",
+            edited_content,
+        )
+        .expect("env config-menu flow should succeed");
+
+        assert!(app.editor.is_none());
+        assert_eq!(app.route, Route::ConfigOpenClawEnv);
+        assert_eq!(
+            data.config
+                .openclaw_env
+                .as_ref()
+                .and_then(|env| env.vars.get("OPENCLAW_ENV_TOKEN")),
+            Some(&Value::String("fresh-token".to_string()))
+        );
+        let warnings = data.config.openclaw_warnings.clone().unwrap_or_default();
+        assert!(!warnings
+            .iter()
+            .any(|warning| warning.code == "stringified_env_vars"));
+    }
+
+    #[test]
+    #[serial]
+    fn openclaw_config_route_tools_entry_from_config_menu_saves_and_clears_warning() {
+        let initial_source = r#"{
+  tools: {
+    profile: 'dangerous',
+  },
+}"#;
+        let edited_content = r#"{
+  "profile": "coding",
+  "allow": ["Read"]
+}"#;
+
+        let (app, data) = run_openclaw_config_menu_submit_flow(
+            crate::cli::tui::app::ConfigItem::OpenClawTools,
+            Route::ConfigOpenClawTools,
+            key(KeyCode::Char('e')),
+            initial_source,
+            EditorSubmit::ConfigOpenClawTools,
+            "invalid_tools_profile",
+            edited_content,
+        )
+        .expect("tools config-menu flow should succeed");
+
+        assert!(app.editor.is_none());
+        assert_eq!(app.route, Route::ConfigOpenClawTools);
+        assert_eq!(
+            data.config
+                .openclaw_tools
+                .as_ref()
+                .and_then(|tools| tools.profile.as_deref()),
+            Some("coding")
+        );
+        let warnings = data.config.openclaw_warnings.clone().unwrap_or_default();
+        assert!(!warnings
+            .iter()
+            .any(|warning| warning.code == "invalid_tools_profile"));
+    }
+
+    #[test]
+    #[serial]
+    fn openclaw_config_route_agents_entry_from_config_menu_saves_and_clears_warning() {
+        let initial_source = r#"{
+  agents: {
+    defaults: {
+      timeout: 42,
+      model: {
+        primary: 'legacy-model',
+      },
+    },
+  },
+}"#;
+        let edited_content = r#"{
+  "model": {
+    "primary": "gpt-4.1"
+  }
+}"#;
+
+        let (app, data) = run_openclaw_config_menu_submit_flow(
+            crate::cli::tui::app::ConfigItem::OpenClawAgents,
+            Route::ConfigOpenClawAgents,
+            key(KeyCode::Enter),
+            initial_source,
+            EditorSubmit::ConfigOpenClawAgents,
+            "legacy_agents_timeout",
+            edited_content,
+        )
+        .expect("agents config-menu flow should succeed");
+
+        assert!(app.editor.is_none());
+        assert_eq!(app.route, Route::ConfigOpenClawAgents);
+        assert_eq!(
+            data.config
+                .openclaw_agents_defaults
+                .as_ref()
+                .and_then(|defaults| defaults.model.as_ref())
+                .map(|model| model.primary.as_str()),
+            Some("gpt-4.1")
+        );
+        let warnings = data.config.openclaw_warnings.clone().unwrap_or_default();
+        assert!(!warnings
+            .iter()
+            .any(|warning| warning.code == "legacy_agents_timeout"));
+    }
 }

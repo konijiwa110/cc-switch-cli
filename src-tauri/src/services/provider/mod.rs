@@ -169,6 +169,37 @@ fn strip_codex_common_config_from_full_text(
     Ok(target_doc.to_string())
 }
 
+fn strip_codex_synced_mcp_servers_from_full_text(
+    config_text: &str,
+    synced_server_ids: &[String],
+) -> Result<String, AppError> {
+    if synced_server_ids.is_empty() || config_text.trim().is_empty() {
+        return Ok(config_text.to_string());
+    }
+
+    let mut doc = config_text
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| AppError::Config(format!("TOML parse error: {e}")))?;
+
+    let remove_root_mcp_servers = if let Some(mcp_servers) = doc
+        .get_mut("mcp_servers")
+        .and_then(|item| item.as_table_like_mut())
+    {
+        for server_id in synced_server_ids {
+            mcp_servers.remove(server_id);
+        }
+        mcp_servers.is_empty()
+    } else {
+        false
+    };
+
+    if remove_root_mcp_servers {
+        doc.as_table_mut().remove("mcp_servers");
+    }
+
+    Ok(doc.to_string())
+}
+
 fn is_codex_official_provider(provider: &Provider) -> bool {
     provider
         .meta
@@ -343,7 +374,9 @@ fn toml_item_is_subset(target: &toml_edit::Item, source: &toml_edit::Item) -> bo
     }
 
     match (target.as_value(), source.as_value()) {
-        (Some(target_value), Some(source_value)) => toml_value_is_subset(target_value, source_value),
+        (Some(target_value), Some(source_value)) => {
+            toml_value_is_subset(target_value, source_value)
+        }
         _ => false,
     }
 }
@@ -368,7 +401,9 @@ fn remove_toml_item(target: &mut toml_edit::Item, source: &toml_edit::Item) {
                     toml_remove_array_items(target_arr, source_arr);
                     remove_item = target_arr.is_empty();
                 }
-                (target_value, source_value) if toml_value_is_subset(target_value, source_value) => {
+                (target_value, source_value)
+                    if toml_value_is_subset(target_value, source_value) =>
+                {
                     remove_item = true;
                 }
                 _ => {}
@@ -381,7 +416,10 @@ fn remove_toml_item(target: &mut toml_edit::Item, source: &toml_edit::Item) {
     }
 }
 
-fn remove_toml_table_like(target: &mut dyn toml_edit::TableLike, source: &dyn toml_edit::TableLike) {
+fn remove_toml_table_like(
+    target: &mut dyn toml_edit::TableLike,
+    source: &dyn toml_edit::TableLike,
+) {
     let keys: Vec<String> = source.iter().map(|(key, _)| key.to_string()).collect();
 
     for key in keys {
@@ -400,7 +438,11 @@ fn remove_toml_table_like(target: &mut dyn toml_edit::TableLike, source: &dyn to
     }
 }
 
-fn provider_uses_common_config(app_type: &AppType, provider: &Provider, snippet: Option<&str>) -> bool {
+fn provider_uses_common_config(
+    app_type: &AppType,
+    provider: &Provider,
+    snippet: Option<&str>,
+) -> bool {
     match provider
         .meta
         .as_ref()
@@ -447,6 +489,46 @@ fn provider_uses_common_config(app_type: &AppType, provider: &Provider, snippet:
     }
 }
 
+fn preferred_apply_common_config(provider: &Provider) -> bool {
+    provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.apply_common_config)
+        .unwrap_or(true)
+}
+
+fn resolve_live_apply_common_config(
+    app_type: &AppType,
+    provider: &Provider,
+    common_config_snippet: Option<&str>,
+    requested_apply_common_config: bool,
+) -> bool {
+    if !requested_apply_common_config {
+        return false;
+    }
+
+    match app_type {
+        AppType::Codex => provider_uses_common_config(app_type, provider, common_config_snippet),
+        AppType::Claude | AppType::Gemini => preferred_apply_common_config(provider),
+        AppType::OpenCode | AppType::OpenClaw => false,
+    }
+}
+
+fn synced_codex_mcp_server_ids(config: &MultiAppConfig) -> Vec<String> {
+    config
+        .mcp
+        .servers
+        .as_ref()
+        .map(|servers| {
+            servers
+                .values()
+                .filter(|server| server.apps.codex)
+                .map(|server| server.id.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
 #[derive(Clone)]
 struct PostCommitAction {
     app_type: AppType,
@@ -461,7 +543,9 @@ struct PostCommitAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{McpApps, McpServer};
     use serial_test::serial;
+    use std::collections::HashMap;
     use std::ffi::OsString;
     use std::path::Path;
     use tempfile::TempDir;
@@ -1031,6 +1115,45 @@ mod tests {
 
     #[test]
     #[serial]
+    fn claude_live_write_and_backup_snapshot_share_common_config_semantics() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        std::fs::create_dir_all(crate::config::get_claude_config_dir())
+            .expect("create ~/.claude (initialized)");
+
+        let provider = Provider::with_id(
+            "p1".to_string(),
+            "Claude".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "token",
+                    "ANTHROPIC_BASE_URL": "https://claude.example"
+                }
+            }),
+            None,
+        );
+        let snippet = r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":"1"}}"#;
+
+        ProviderService::write_live_snapshot(&AppType::Claude, &provider, Some(snippet), true)
+            .expect("write live snapshot");
+        let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
+
+        let backup = ProviderService::build_live_backup_snapshot(
+            &AppType::Claude,
+            &provider,
+            Some(snippet),
+            true,
+        )
+        .expect("build backup snapshot");
+
+        assert_eq!(
+            live, backup,
+            "Claude live write and backup snapshot should apply the same common snippet semantics"
+        );
+    }
+
+    #[test]
+    #[serial]
     fn claude_switch_strips_common_array_items_but_preserves_provider_specific_ones() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = EnvGuard::set_home(temp_home.path());
@@ -1163,7 +1286,10 @@ mod tests {
         state.save().expect("persist legacy provider state");
 
         {
-            let guard = state.config.read().expect("read config for setup assertion");
+            let guard = state
+                .config
+                .read()
+                .expect("read config for setup assertion");
             let p2 = guard
                 .get_manager(&AppType::Claude)
                 .and_then(|manager| manager.providers.get("p2"))
@@ -1189,14 +1315,20 @@ mod tests {
         let cfg = state.config.read().expect("read config after switch");
         let manager = cfg.get_manager(&AppType::Claude).expect("claude manager");
         let p2_after = manager.providers.get("p2").expect("p2 exists");
-        let meta = p2_after.meta.as_ref().expect("p2 meta should be normalized");
+        let meta = p2_after
+            .meta
+            .as_ref()
+            .expect("p2 meta should be normalized");
         assert_eq!(
             meta.apply_common_config,
             Some(true),
             "legacy common-config usage should be normalized into explicit meta"
         );
         assert!(
-            p2_after.settings_config.get("includeCoAuthoredBy").is_none(),
+            p2_after
+                .settings_config
+                .get("includeCoAuthoredBy")
+                .is_none(),
             "normalized snapshot should strip common top-level keys"
         );
         assert!(
@@ -1338,6 +1470,100 @@ base_url = "http://localhost:8080"
 
     #[test]
     #[serial]
+    fn codex_switch_backfill_does_not_persist_synced_mcp_servers_into_previous_provider_snapshot() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
+            .expect("create ~/.codex (initialized)");
+
+        let p1_config = concat!(
+            "model_provider = \"first\"\n",
+            "model = \"gpt-5.2-codex\"\n\n",
+            "[model_providers.first]\n",
+            "base_url = \"https://api.one.example/v1\"\n",
+            "wire_api = \"responses\"\n",
+            "requires_openai_auth = true\n"
+        );
+        let p2_config = concat!(
+            "model_provider = \"second\"\n",
+            "model = \"gpt-5.2-codex\"\n\n",
+            "[model_providers.second]\n",
+            "base_url = \"https://api.two.example/v1\"\n",
+            "wire_api = \"responses\"\n",
+            "requires_openai_auth = true\n"
+        );
+
+        let mut config = MultiAppConfig::default();
+        config.ensure_app(&AppType::Codex);
+        config.mcp.servers = Some(HashMap::from([(
+            "echo-server".to_string(),
+            McpServer {
+                id: "echo-server".to_string(),
+                name: "Echo Server".to_string(),
+                server: json!({
+                    "type": "stdio",
+                    "command": "echo"
+                }),
+                apps: McpApps {
+                    claude: false,
+                    codex: true,
+                    gemini: false,
+                    opencode: false,
+                },
+                description: None,
+                homepage: None,
+                docs: None,
+                tags: Vec::new(),
+            },
+        )]));
+        {
+            let manager = config
+                .get_manager_mut(&AppType::Codex)
+                .expect("codex manager");
+            manager.current = "p1".to_string();
+            manager.providers.insert(
+                "p1".to_string(),
+                Provider::with_id(
+                    "p1".to_string(),
+                    "First".to_string(),
+                    json!({ "config": p1_config }),
+                    None,
+                ),
+            );
+            manager.providers.insert(
+                "p2".to_string(),
+                Provider::with_id(
+                    "p2".to_string(),
+                    "Second".to_string(),
+                    json!({ "config": p2_config }),
+                    None,
+                ),
+            );
+        }
+
+        let state = state_from_config(config);
+        std::fs::write(get_codex_config_path(), p1_config).expect("seed config.toml");
+        crate::services::mcp::McpService::sync_all_enabled(&state).expect("sync MCP to live");
+
+        ProviderService::switch(&state, AppType::Codex, "p2").expect("switch should succeed");
+
+        let cfg = state.config.read().expect("read config after switch");
+        let manager = cfg.get_manager(&AppType::Codex).expect("codex manager");
+        let p1_after = manager.providers.get("p1").expect("p1 exists");
+        let stored_config = p1_after
+            .settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("stored config text");
+
+        assert!(
+            !stored_config.contains("[mcp_servers.echo-server]"),
+            "backfill snapshot should not persist synced Codex MCP servers"
+        );
+    }
+
+    #[test]
+    #[serial]
     fn common_config_snippet_can_be_disabled_per_provider_for_codex() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = EnvGuard::set_home(temp_home.path());
@@ -1424,9 +1650,8 @@ base_url = "http://localhost:8080"
 
         let mut config = MultiAppConfig::default();
         config.ensure_app(&AppType::Codex);
-        config.common_config_snippets.codex = Some(
-            "disable_response_storage = true\nnetwork_access = \"restricted\"\n".to_string(),
-        );
+        config.common_config_snippets.codex =
+            Some("disable_response_storage = true\nnetwork_access = \"restricted\"\n".to_string());
         {
             let manager = config
                 .get_manager_mut(&AppType::Codex)
@@ -1455,7 +1680,8 @@ base_url = "http://localhost:8080"
 
         let state = state_from_config(config);
 
-        std::fs::write(get_codex_config_path(), p1_config).expect("seed config.toml with p1 live state");
+        std::fs::write(get_codex_config_path(), p1_config)
+            .expect("seed config.toml with p1 live state");
 
         ProviderService::switch(&state, AppType::Codex, "p2").expect("switch should succeed");
 
@@ -1508,9 +1734,8 @@ base_url = "http://localhost:8080"
 
         let mut config = MultiAppConfig::default();
         config.ensure_app(&AppType::Codex);
-        config.common_config_snippets.codex = Some(
-            "[mcp_servers.shared]\nbase_url = \"http://localhost:8080\"\n".to_string(),
-        );
+        config.common_config_snippets.codex =
+            Some("[mcp_servers.shared]\nbase_url = \"http://localhost:8080\"\n".to_string());
         {
             let manager = config
                 .get_manager_mut(&AppType::Codex)
@@ -1539,7 +1764,8 @@ base_url = "http://localhost:8080"
         }
 
         let state = state_from_config(config);
-        std::fs::write(get_codex_config_path(), p1_config).expect("seed config.toml with p1 live state");
+        std::fs::write(get_codex_config_path(), p1_config)
+            .expect("seed config.toml with p1 live state");
 
         ProviderService::switch(&state, AppType::Codex, "p2").expect("switch to p2");
 
@@ -1572,9 +1798,8 @@ base_url = "http://localhost:8080"
 
         let mut config = MultiAppConfig::default();
         config.ensure_app(&AppType::Codex);
-        config.common_config_snippets.codex = Some(
-            "disable_response_storage = true\nnetwork_access = \"restricted\"\n".to_string(),
-        );
+        config.common_config_snippets.codex =
+            Some("disable_response_storage = true\nnetwork_access = \"restricted\"\n".to_string());
         {
             let manager = config
                 .get_manager_mut(&AppType::Codex)
@@ -1633,9 +1858,8 @@ base_url = "http://localhost:8080"
 
         let mut config = MultiAppConfig::default();
         config.ensure_app(&AppType::Codex);
-        config.common_config_snippets.codex = Some(
-            "disable_response_storage = true\nnetwork_access = \"restricted\"\n".to_string(),
-        );
+        config.common_config_snippets.codex =
+            Some("disable_response_storage = true\nnetwork_access = \"restricted\"\n".to_string());
         {
             let manager = config
                 .get_manager_mut(&AppType::Codex)
@@ -1694,9 +1918,8 @@ base_url = "http://localhost:8080"
 
         let mut config = MultiAppConfig::default();
         config.ensure_app(&AppType::Codex);
-        config.common_config_snippets.codex = Some(
-            "disable_response_storage = true\nnetwork_access = \"restricted\"\n".to_string(),
-        );
+        config.common_config_snippets.codex =
+            Some("disable_response_storage = true\nnetwork_access = \"restricted\"\n".to_string());
         {
             let manager = config
                 .get_manager_mut(&AppType::Codex)
@@ -1732,7 +1955,10 @@ base_url = "http://localhost:8080"
         state.save().expect("persist legacy provider state");
 
         {
-            let guard = state.config.read().expect("read config for setup assertion");
+            let guard = state
+                .config
+                .read()
+                .expect("read config for setup assertion");
             let p2 = guard
                 .get_manager(&AppType::Codex)
                 .and_then(|manager| manager.providers.get("p2"))
@@ -1758,7 +1984,10 @@ base_url = "http://localhost:8080"
         let cfg = state.config.read().expect("read config after switch");
         let manager = cfg.get_manager(&AppType::Codex).expect("codex manager");
         let p2_after = manager.providers.get("p2").expect("p2 exists");
-        let meta = p2_after.meta.as_ref().expect("p2 meta should be normalized");
+        let meta = p2_after
+            .meta
+            .as_ref()
+            .expect("p2 meta should be normalized");
         assert_eq!(
             meta.apply_common_config,
             Some(true),
@@ -1800,9 +2029,8 @@ base_url = "http://localhost:8080"
 
         let mut config = MultiAppConfig::default();
         config.ensure_app(&AppType::Codex);
-        config.common_config_snippets.codex = Some(
-            "disable_response_storage = true\nnetwork_access = \"restricted\"\n".to_string(),
-        );
+        config.common_config_snippets.codex =
+            Some("disable_response_storage = true\nnetwork_access = \"restricted\"\n".to_string());
         {
             let manager = config
                 .get_manager_mut(&AppType::Codex)
@@ -1828,7 +2056,10 @@ base_url = "http://localhost:8080"
         state.save().expect("persist legacy provider state");
 
         {
-            let guard = state.config.read().expect("read config for setup assertion");
+            let guard = state
+                .config
+                .read()
+                .expect("read config for setup assertion");
             let p1 = guard
                 .get_manager(&AppType::Codex)
                 .and_then(|manager| manager.providers.get("p1"))
@@ -1857,7 +2088,10 @@ base_url = "http://localhost:8080"
         let cfg = state.config.read().expect("read config after update");
         let manager = cfg.get_manager(&AppType::Codex).expect("codex manager");
         let p1_after = manager.providers.get("p1").expect("p1 exists");
-        let meta = p1_after.meta.as_ref().expect("p1 meta should be normalized");
+        let meta = p1_after
+            .meta
+            .as_ref()
+            .expect("p1 meta should be normalized");
         assert_eq!(
             meta.apply_common_config,
             Some(true),
@@ -1968,9 +2202,8 @@ base_url = "http://localhost:8080"
 
         let mut config = MultiAppConfig::default();
         config.ensure_app(&AppType::Codex);
-        config.common_config_snippets.codex = Some(
-            "disable_response_storage = true\nnetwork_access = \"restricted\"\n".to_string(),
-        );
+        config.common_config_snippets.codex =
+            Some("disable_response_storage = true\nnetwork_access = \"restricted\"\n".to_string());
         {
             let manager = config
                 .get_manager_mut(&AppType::Codex)
@@ -1999,7 +2232,8 @@ base_url = "http://localhost:8080"
         }
 
         let state = state_from_config(config);
-        std::fs::write(get_codex_config_path(), p1_config).expect("seed config.toml with p1 live state");
+        std::fs::write(get_codex_config_path(), p1_config)
+            .expect("seed config.toml with p1 live state");
 
         ProviderService::switch(&state, AppType::Codex, "p2").expect("switch to p2");
         ProviderService::switch(&state, AppType::Codex, "p1").expect("switch back to p1");
@@ -2566,11 +2800,7 @@ impl ProviderService {
     }
 
     fn apply_post_commit(state: &AppState, action: &PostCommitAction) -> Result<(), AppError> {
-        let apply_common_config = provider_uses_common_config(
-            &action.app_type,
-            &action.provider,
-            action.common_config_snippet.as_deref(),
-        );
+        let apply_common_config = preferred_apply_common_config(&action.provider);
         if action.takeover_active {
             let backup_snapshot = Self::build_live_backup_snapshot(
                 &action.app_type,
@@ -2660,8 +2890,10 @@ impl ProviderService {
                                     .and_then(|meta| meta.apply_common_config)
                                     .is_none()
                             {
-                                target.meta.get_or_insert_with(Default::default).apply_common_config =
-                                    Some(true);
+                                target
+                                    .meta
+                                    .get_or_insert_with(Default::default)
+                                    .apply_common_config = Some(true);
                             }
                             target.settings_config = live_after;
                         }
@@ -2690,11 +2922,11 @@ impl ProviderService {
                         .and_then(|provider| provider.meta.as_ref())
                         .and_then(|meta| meta.apply_common_config);
                     let uses_common = provider.is_some_and(|provider| {
-                            provider_uses_common_config(app_type, provider, snippet.as_deref())
-                        });
+                        provider_uses_common_config(app_type, provider, snippet.as_deref())
+                    });
                     (snippet, uses_common, explicit_apply_common)
                 };
-                let cfg_to_store = if provider_uses_common {
+                let mut cfg_to_store = if provider_uses_common {
                     strip_codex_common_config_from_full_text(
                         &cfg_text,
                         common_snippet_for_strip.as_deref().unwrap_or_default(),
@@ -2702,6 +2934,15 @@ impl ProviderService {
                 } else {
                     cfg_text.clone()
                 };
+
+                let synced_codex_mcp_server_ids = {
+                    let guard = state.config.read().map_err(AppError::from)?;
+                    synced_codex_mcp_server_ids(&guard)
+                };
+                cfg_to_store = strip_codex_synced_mcp_servers_from_full_text(
+                    &cfg_to_store,
+                    &synced_codex_mcp_server_ids,
+                )?;
 
                 {
                     let mut guard = state.config.write().map_err(AppError::from)?;
@@ -2726,8 +2967,10 @@ impl ProviderService {
                                     .and_then(|meta| meta.apply_common_config)
                                     .is_none()
                             {
-                                target.meta.get_or_insert_with(Default::default).apply_common_config =
-                                    Some(true);
+                                target
+                                    .meta
+                                    .get_or_insert_with(Default::default)
+                                    .apply_common_config = Some(true);
                             }
                             let obj = target.settings_config.as_object_mut().ok_or_else(|| {
                                 AppError::Config(format!(
@@ -2804,8 +3047,10 @@ impl ProviderService {
                                     .and_then(|meta| meta.apply_common_config)
                                     .is_none()
                             {
-                                target.meta.get_or_insert_with(Default::default).apply_common_config =
-                                    Some(true);
+                                target
+                                    .meta
+                                    .get_or_insert_with(Default::default)
+                                    .apply_common_config = Some(true);
                             }
                             target.settings_config = live_after;
                         }
@@ -3019,7 +3264,9 @@ impl ProviderService {
                 provider_clone.clone()
             };
 
-            manager.providers.insert(provider_id.clone(), merged.clone());
+            manager
+                .providers
+                .insert(provider_id.clone(), merged.clone());
 
             let action = if is_current {
                 let backup = Self::capture_live_snapshot(&app_type_clone)?;
@@ -3551,6 +3798,8 @@ impl ProviderService {
             (None, false)
         };
 
+        let synced_codex_mcp_server_ids = synced_codex_mcp_server_ids(config);
+
         if let Some(manager) = config.get_manager_mut(&AppType::Codex) {
             if let Some(current) = manager.providers.get_mut(&current_id) {
                 if !current.settings_config.is_object() {
@@ -3564,8 +3813,10 @@ impl ProviderService {
                         .and_then(|meta| meta.apply_common_config)
                         .is_none()
                 {
-                    current.meta.get_or_insert_with(Default::default).apply_common_config =
-                        Some(true);
+                    current
+                        .meta
+                        .get_or_insert_with(Default::default)
+                        .apply_common_config = Some(true);
                 }
 
                 let obj = current.settings_config.as_object_mut().unwrap();
@@ -3573,6 +3824,10 @@ impl ProviderService {
                     obj.insert("auth".to_string(), auth);
                 }
                 if let Some(config_text) = config_text {
+                    let config_text = strip_codex_synced_mcp_servers_from_full_text(
+                        &config_text,
+                        &synced_codex_mcp_server_ids,
+                    )?;
                     obj.insert("config".to_string(), Value::String(config_text));
                 }
             }
@@ -3808,8 +4063,10 @@ impl ProviderService {
                         .and_then(|meta| meta.apply_common_config)
                         .is_none()
                 {
-                    current.meta.get_or_insert_with(Default::default).apply_common_config =
-                        Some(true);
+                    current
+                        .meta
+                        .get_or_insert_with(Default::default)
+                        .apply_common_config = Some(true);
                 }
                 current.settings_config = live;
             }
@@ -3881,8 +4138,10 @@ impl ProviderService {
                         .and_then(|meta| meta.apply_common_config)
                         .is_none()
                 {
-                    current.meta.get_or_insert_with(Default::default).apply_common_config =
-                        Some(true);
+                    current
+                        .meta
+                        .get_or_insert_with(Default::default)
+                        .apply_common_config = Some(true);
                 }
                 current.settings_config = live;
             }
@@ -4061,8 +4320,12 @@ impl ProviderService {
         common_config_snippet: Option<&str>,
         apply_common_config: bool,
     ) -> Result<(), AppError> {
-        let apply_common_config =
-            apply_common_config && provider_uses_common_config(app_type, provider, common_config_snippet);
+        let apply_common_config = resolve_live_apply_common_config(
+            app_type,
+            provider,
+            common_config_snippet,
+            apply_common_config,
+        );
 
         match app_type {
             AppType::Codex => {
@@ -4119,10 +4382,8 @@ impl ProviderService {
                 ) {
                     Ok(config) => crate::openclaw_config::set_typed_provider(&provider.id, &config)
                         .map(|_| ()),
-                    Err(_) => {
-                        crate::openclaw_config::set_provider(&provider.id, settings_config)
-                            .map(|_| ())
-                    }
+                    Err(_) => crate::openclaw_config::set_provider(&provider.id, settings_config)
+                        .map(|_| ()),
                 }
             }
         }
@@ -4134,8 +4395,12 @@ impl ProviderService {
         common_config_snippet: Option<&str>,
         apply_common_config: bool,
     ) -> Result<Value, AppError> {
-        let apply_common_config =
-            apply_common_config && provider_uses_common_config(app_type, provider, common_config_snippet);
+        let apply_common_config = resolve_live_apply_common_config(
+            app_type,
+            provider,
+            common_config_snippet,
+            apply_common_config,
+        );
 
         match app_type {
             AppType::Claude => {

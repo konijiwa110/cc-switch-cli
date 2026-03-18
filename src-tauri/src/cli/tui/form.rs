@@ -11,7 +11,8 @@ mod provider_templates;
 #[cfg(test)]
 mod tests;
 
-pub use provider_json::strip_provider_internal_fields;
+#[cfg(test)]
+pub(crate) use provider_json::strip_provider_internal_fields;
 
 pub const OPENCLAW_DEFAULT_API_PROTOCOL: &str = "openai-completions";
 pub const OPENCLAW_DEFAULT_USER_AGENT: &str =

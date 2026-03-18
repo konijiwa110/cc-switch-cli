@@ -1000,6 +1000,52 @@ fn provider_add_form_opencode_uses_custom_template_only() {
 }
 
 #[test]
+fn provider_add_form_openclaw_uses_dedicated_template_defs() {
+    let openclaw_defs =
+        super::provider_templates::provider_builtin_template_defs(&AppType::OpenClaw);
+    let opencode_defs =
+        super::provider_templates::provider_builtin_template_defs(&AppType::OpenCode);
+    let openclaw_labels = ProviderAddFormState::new(AppType::OpenClaw).template_labels();
+
+    assert_eq!(openclaw_labels, vec!["Custom"]);
+    assert!(
+        !std::ptr::eq(openclaw_defs, opencode_defs),
+        "OpenClaw should keep its own template mapping instead of aliasing OpenCode"
+    );
+}
+
+#[test]
+fn provider_add_form_openclaw_switching_to_custom_resets_openclaw_specific_fields() {
+    let mut form = ProviderAddFormState::new(AppType::OpenClaw);
+
+    form.id.set("oclaw1");
+    form.name.set("OpenClaw Provider");
+    form.opencode_npm_package.set("anthropic-messages");
+    form.opencode_api_key.set("sk-openclaw");
+    form.opencode_base_url
+        .set("https://api.openclaw.example/v1");
+    form.openclaw_user_agent = true;
+    form.openclaw_models = vec![json!({
+        "id": "primary-model",
+        "name": "Primary Model",
+        "contextWindow": 128000,
+    })];
+
+    form.apply_template(0, &[]);
+
+    assert_eq!(form.id.value, "");
+    assert_eq!(form.name.value, "");
+    assert_eq!(
+        form.opencode_npm_package.value,
+        OPENCLAW_DEFAULT_API_PROTOCOL
+    );
+    assert_eq!(form.opencode_api_key.value, "");
+    assert_eq!(form.opencode_base_url.value, "");
+    assert!(!form.openclaw_user_agent);
+    assert!(form.openclaw_models.is_empty());
+}
+
+#[test]
 fn provider_add_form_opencode_includes_dedicated_fields() {
     let form = ProviderAddFormState::new(AppType::OpenCode);
     let fields = form.fields();
@@ -1295,6 +1341,107 @@ fn provider_add_form_openclaw_from_provider_preserves_other_models_on_roundtrip(
     assert_eq!(models[1]["id"], "fallback-model");
     assert_eq!(models[0]["providerHint"], "reasoning");
     assert_eq!(roundtrip["settingsConfig"]["headers"]["X-Test"], "1");
+}
+
+#[test]
+fn provider_add_form_openclaw_roundtrip_preserves_unknown_model_fields() {
+    let provider = Provider::with_id(
+        "oclaw1".to_string(),
+        "OpenClaw Provider".to_string(),
+        json!({
+            "api": "openai-responses",
+            "models": [
+                {
+                    "id": "gpt-4.1",
+                    "name": "GPT-4.1",
+                    "reasoning": true,
+                    "input": ["text", "image"],
+                    "contextWindow": 128000,
+                    "maxTokens": 8192,
+                    "cost": {
+                        "input": 2.0,
+                        "output": 8.0,
+                        "cacheRead": 1.0,
+                        "cacheWrite": 4.0
+                    }
+                }
+            ]
+        }),
+        None,
+    );
+
+    let form = ProviderAddFormState::from_provider(AppType::OpenClaw, &provider);
+    let roundtrip = form.to_provider_json_value();
+
+    assert_eq!(roundtrip["settingsConfig"]["models"][0]["reasoning"], true);
+    assert_eq!(
+        roundtrip["settingsConfig"]["models"][0]["input"],
+        json!(["text", "image"])
+    );
+    assert_eq!(roundtrip["settingsConfig"]["models"][0]["maxTokens"], 8192);
+    assert_eq!(
+        roundtrip["settingsConfig"]["models"][0]["cost"]["cacheRead"],
+        1.0
+    );
+    assert_eq!(
+        roundtrip["settingsConfig"]["models"][0]["cost"]["cacheWrite"],
+        4.0
+    );
+}
+
+#[test]
+fn provider_add_form_openclaw_editing_primary_model_keeps_full_models_array_and_unknown_fields() {
+    let provider = Provider::with_id(
+        "oclaw1".to_string(),
+        "OpenClaw Provider".to_string(),
+        json!({
+            "api": "openai-completions",
+            "models": [
+                {
+                    "id": "primary-model",
+                    "name": "Primary Model",
+                    "contextWindow": 128000,
+                    "reasoning": true,
+                    "cost": {
+                        "cacheRead": 1.0,
+                        "cacheWrite": 4.0
+                    }
+                },
+                {
+                    "id": "fallback-model",
+                    "name": "Fallback Model",
+                    "contextWindow": 64000,
+                    "providerHint": "fallback",
+                    "input": ["text"]
+                }
+            ]
+        }),
+        None,
+    );
+
+    let mut form = ProviderAddFormState::from_provider(AppType::OpenClaw, &provider);
+    form.opencode_model_name.set("Primary Model Updated");
+    form.opencode_model_context_limit.set("256000");
+
+    let roundtrip = form.to_provider_json_value();
+    let models = roundtrip["settingsConfig"]["models"]
+        .as_array()
+        .expect("OpenClaw models should remain an array");
+
+    assert_eq!(
+        models.len(),
+        2,
+        "editing the primary model should keep fallbacks"
+    );
+    assert_eq!(models[0]["id"], "primary-model");
+    assert_eq!(models[0]["name"], "Primary Model Updated");
+    assert_eq!(models[0]["contextWindow"], 256000);
+    assert_eq!(models[0]["reasoning"], true);
+    assert_eq!(models[0]["cost"]["cacheRead"], 1.0);
+    assert_eq!(models[0]["cost"]["cacheWrite"], 4.0);
+    assert_eq!(models[1]["id"], "fallback-model");
+    assert_eq!(models[1]["providerHint"], "fallback");
+    assert_eq!(models[1]["input"], json!(["text"]));
 }
 
 #[test]

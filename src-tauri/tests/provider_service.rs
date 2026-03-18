@@ -20,6 +20,11 @@ fn sanitize_provider_name(name: &str) -> String {
         .to_lowercase()
 }
 
+fn read_openclaw_live_config_json5(path: &std::path::Path) -> serde_json::Value {
+    let source = std::fs::read_to_string(path).expect("read openclaw live config source");
+    json5::from_str(&source).expect("parse openclaw live config as json5")
+}
+
 #[test]
 fn provider_service_switch_codex_updates_live_and_config() {
     let _guard = lock_test_mutex();
@@ -879,6 +884,105 @@ fn provider_service_import_openclaw_providers_from_live_imports_missing_live_pro
 }
 
 #[test]
+fn provider_service_import_openclaw_live_skips_blank_ids_and_existing_entries() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let openclaw_dir = home.join(".openclaw");
+    std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+    let openclaw_path = openclaw_dir.join("openclaw.json");
+    std::fs::write(
+        &openclaw_path,
+        r#"{
+            models: {
+                mode: 'merge',
+                providers: {
+                    '': {
+                        apiKey: 'sk-blank',
+                        baseUrl: 'https://blank.example/v1',
+                        models: [{ id: 'ignored', name: 'Ignored Blank Entry' }],
+                    },
+                    existing: {
+                        apiKey: 'sk-existing-live',
+                        baseUrl: 'https://existing-live.example/v1',
+                        models: [{ id: 'existing-model', name: 'Existing Live Name' }],
+                    },
+                    newcomer: {
+                        apiKey: 'sk-newcomer',
+                        baseUrl: 'https://newcomer.example/v1',
+                        models: [{ id: 'new-model', name: 'New Model' }],
+                    },
+                },
+            },
+        }"#,
+    )
+    .expect("seed openclaw json5 live config");
+
+    let mut config = MultiAppConfig::default();
+    config
+        .get_manager_mut(&AppType::OpenClaw)
+        .expect("openclaw manager")
+        .providers
+        .insert(
+            "existing".to_string(),
+            Provider::with_id(
+                "existing".to_string(),
+                "Already Imported".to_string(),
+                json!({
+                    "apiKey": "sk-existing-db",
+                    "baseUrl": "https://existing-db.example/v1",
+                    "models": [{ "id": "existing-model", "name": "Existing DB Name" }]
+                }),
+                None,
+            ),
+        );
+
+    let state = state_from_config(config);
+
+    let imported = ProviderService::import_openclaw_providers_from_live(&state)
+        .expect("import openclaw live config should succeed");
+
+    assert_eq!(
+        imported, 1,
+        "only the missing non-blank provider should be imported"
+    );
+
+    let guard = state
+        .config
+        .read()
+        .expect("read openclaw config after blank-id import");
+    let manager = guard
+        .get_manager(&AppType::OpenClaw)
+        .expect("openclaw manager after blank-id import");
+
+    assert_eq!(manager.providers.len(), 2);
+    assert!(!manager.providers.contains_key(""));
+    assert!(manager.providers.contains_key("existing"));
+    assert!(manager.providers.contains_key("newcomer"));
+    assert!(
+        manager.current.is_empty(),
+        "additive-mode import should keep current provider empty"
+    );
+    assert_eq!(
+        manager
+            .providers
+            .get("existing")
+            .expect("existing provider should stay untouched")
+            .name,
+        "Already Imported"
+    );
+    assert_eq!(
+        manager
+            .providers
+            .get("newcomer")
+            .expect("new provider should be imported")
+            .name,
+        "New Model"
+    );
+}
+
+#[test]
 fn provider_service_import_openclaw_providers_from_live_skips_modeless_provider_even_if_default_references_it(
 ) {
     let _guard = lock_test_mutex();
@@ -1656,8 +1760,7 @@ fn provider_service_delete_openclaw_default_provider_removes_provider_like_upstr
         .expect("openclaw manager after delete");
     assert!(!manager.providers.contains_key("keep"));
 
-    let live_after: serde_json::Value =
-        read_json_file(&openclaw_path).expect("read openclaw live config after delete");
+    let live_after = read_openclaw_live_config_json5(&openclaw_path);
     assert_eq!(
         live_after["agents"]["defaults"]["model"]["primary"],
         "keep/fallback-model"
@@ -1738,8 +1841,7 @@ fn provider_service_delete_openclaw_provider_referenced_only_by_fallback_removes
         .expect("openclaw manager after delete");
     assert!(!manager.providers.contains_key("keep"));
 
-    let live_after: serde_json::Value =
-        read_json_file(&openclaw_path).expect("read openclaw live config after delete");
+    let live_after = read_openclaw_live_config_json5(&openclaw_path);
     assert_eq!(
         live_after["agents"]["defaults"]["model"]["fallbacks"],
         json!(["keep/fallback-model"])

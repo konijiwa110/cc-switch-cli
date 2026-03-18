@@ -8,6 +8,9 @@ pub(crate) fn route_has_content_list(route: &Route) -> bool {
             | Route::Mcp
             | Route::Prompts
             | Route::Config
+            | Route::ConfigOpenClawEnv
+            | Route::ConfigOpenClawTools
+            | Route::ConfigOpenClawAgents
             | Route::ConfigWebDav
             | Route::Skills
             | Route::SkillsDiscover
@@ -160,31 +163,23 @@ pub(crate) fn visible_skills_unmanaged<'a>(
         .collect()
 }
 
-pub(crate) fn visible_config_items(filter: &FilterState) -> Vec<ConfigItem> {
-    let all = ConfigItem::ALL.to_vec();
+pub(crate) fn visible_config_items(filter: &FilterState, app_type: &AppType) -> Vec<ConfigItem> {
+    let all = ConfigItem::ALL
+        .iter()
+        .filter(|item| item.visible_for_app(app_type))
+        .cloned()
+        .collect::<Vec<_>>();
     let Some(q) = filter.query_lower() else {
         return all;
     };
 
     all.into_iter()
-        .filter(|item| config_item_label(item).to_lowercase().contains(&q))
+        .filter(|item| item.label().to_lowercase().contains(&q))
         .collect()
 }
 
 pub(crate) fn config_item_label(item: &ConfigItem) -> &'static str {
-    match item {
-        ConfigItem::Path => crate::cli::i18n::texts::tui_config_item_show_path(),
-        ConfigItem::ShowFull => crate::cli::i18n::texts::tui_config_item_show_full(),
-        ConfigItem::Export => crate::cli::i18n::texts::tui_config_item_export(),
-        ConfigItem::Import => crate::cli::i18n::texts::tui_config_item_import(),
-        ConfigItem::Backup => crate::cli::i18n::texts::tui_config_item_backup(),
-        ConfigItem::Restore => crate::cli::i18n::texts::tui_config_item_restore(),
-        ConfigItem::Validate => crate::cli::i18n::texts::tui_config_item_validate(),
-        ConfigItem::CommonSnippet => crate::cli::i18n::texts::tui_config_item_common_snippet(),
-        ConfigItem::Proxy => crate::cli::i18n::texts::tui_config_item_proxy(),
-        ConfigItem::WebDavSync => crate::cli::i18n::texts::tui_config_item_webdav_sync(),
-        ConfigItem::Reset => crate::cli::i18n::texts::tui_config_item_reset(),
-    }
+    item.label()
 }
 
 pub(crate) fn visible_webdav_config_items(filter: &FilterState) -> Vec<WebDavConfigItem> {

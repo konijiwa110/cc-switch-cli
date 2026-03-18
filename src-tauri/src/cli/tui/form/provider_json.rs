@@ -570,7 +570,8 @@ pub(crate) fn should_hide_provider_field(key: &str) -> bool {
     )
 }
 
-pub fn strip_provider_internal_fields(value: &Value) -> Value {
+#[cfg(test)]
+pub(crate) fn strip_provider_internal_fields(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
             let mut out = serde_json::Map::new();

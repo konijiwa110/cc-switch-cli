@@ -6,6 +6,9 @@ use serde_json::Value;
 
 use crate::app_config::{AppType, CommonConfigSnippets, McpServer};
 use crate::error::AppError;
+use crate::openclaw_config::{
+    OpenClawAgentsDefaults, OpenClawEnvConfig, OpenClawHealthWarning, OpenClawToolsConfig,
+};
 use crate::prompt::Prompt;
 use crate::provider::Provider;
 use crate::services::config::BackupInfo;
@@ -61,6 +64,12 @@ pub struct ConfigSnapshot {
     pub common_snippet: String,
     pub common_snippets: CommonConfigSnippets,
     pub webdav_sync: Option<crate::settings::WebDavSyncSettings>,
+    pub openclaw_config_path: Option<PathBuf>,
+    pub openclaw_config_dir: Option<PathBuf>,
+    pub openclaw_env: Option<OpenClawEnvConfig>,
+    pub openclaw_tools: Option<OpenClawToolsConfig>,
+    pub openclaw_agents_defaults: Option<OpenClawAgentsDefaults>,
+    pub openclaw_warnings: Option<Vec<OpenClawHealthWarning>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -175,9 +184,8 @@ fn load_providers(state: &AppState, app_type: &AppType) -> Result<ProvidersSnaps
     } else {
         None
     };
-    let openclaw_default_model_ids = openclaw_default_model_ids_by_provider(
-        openclaw_default_model.as_ref(),
-    );
+    let openclaw_default_model_ids =
+        openclaw_default_model_ids_by_provider(openclaw_default_model.as_ref());
     let openclaw_primary_default_provider_id = openclaw_default_model
         .as_ref()
         .and_then(|model| openclaw_default_model_ref_parts(&model.primary))
@@ -186,7 +194,8 @@ fn load_providers(state: &AppState, app_type: &AppType) -> Result<ProvidersSnaps
     let mut rows = sorted
         .into_iter()
         .map(|(id, provider)| {
-            let provider = openclaw_provider_for_row(&id, provider, openclaw_live_providers.get(&id));
+            let provider =
+                openclaw_provider_for_row(&id, provider, openclaw_live_providers.get(&id));
 
             ProviderRow {
                 api_url: extract_api_url(&provider.settings_config, app_type),
@@ -314,7 +323,11 @@ fn extract_primary_model_id(
     }
 }
 
-fn openclaw_provider_for_row(id: &str, provider: Provider, openclaw_live_provider: Option<&Value>) -> Provider {
+fn openclaw_provider_for_row(
+    id: &str,
+    provider: Provider,
+    openclaw_live_provider: Option<&Value>,
+) -> Provider {
     let Some(live_provider) = openclaw_live_provider else {
         return provider;
     };
@@ -426,6 +439,7 @@ fn load_config_snapshot(state: &AppState, app_type: &AppType) -> Result<ConfigSn
         let common_snippet = common_snippets.get(app_type).cloned().unwrap_or_default();
         (common_snippet, common_snippets)
     };
+    let openclaw_snapshot = load_openclaw_config_snapshot(app_type)?;
 
     Ok(ConfigSnapshot {
         config_path,
@@ -434,7 +448,75 @@ fn load_config_snapshot(state: &AppState, app_type: &AppType) -> Result<ConfigSn
         common_snippet,
         common_snippets,
         webdav_sync: crate::settings::get_webdav_sync_settings(),
+        openclaw_config_path: openclaw_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.config_path.clone()),
+        openclaw_config_dir: openclaw_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.config_dir.clone()),
+        openclaw_env: openclaw_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.env.clone()),
+        openclaw_tools: openclaw_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.tools.clone()),
+        openclaw_agents_defaults: openclaw_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.agents_defaults.clone()),
+        openclaw_warnings: openclaw_snapshot.map(|snapshot| snapshot.warnings),
     })
+}
+
+#[derive(Debug, Clone)]
+struct OpenClawConfigSnapshot {
+    config_path: PathBuf,
+    config_dir: PathBuf,
+    env: Option<OpenClawEnvConfig>,
+    tools: Option<OpenClawToolsConfig>,
+    agents_defaults: Option<OpenClawAgentsDefaults>,
+    warnings: Vec<OpenClawHealthWarning>,
+}
+
+fn load_openclaw_config_snapshot(
+    app_type: &AppType,
+) -> Result<Option<OpenClawConfigSnapshot>, AppError> {
+    if !matches!(app_type, AppType::OpenClaw) {
+        return Ok(None);
+    }
+
+    let warnings = crate::openclaw_config::scan_openclaw_config_health()?;
+    let env = load_openclaw_slice("env", crate::openclaw_config::get_env_config)?;
+    let tools = load_openclaw_slice("tools", crate::openclaw_config::get_tools_config)?;
+    let agents_defaults = load_openclaw_slice(
+        "agents.defaults",
+        crate::openclaw_config::get_agents_defaults,
+    )?;
+
+    Ok(Some(OpenClawConfigSnapshot {
+        config_path: crate::openclaw_config::get_openclaw_config_path(),
+        config_dir: crate::openclaw_config::get_openclaw_dir(),
+        env: Some(env),
+        tools: Some(tools),
+        agents_defaults,
+        warnings,
+    }))
+}
+
+fn load_openclaw_slice<T, F>(section_name: &'static str, loader: F) -> Result<T, AppError>
+where
+    T: Default,
+    F: FnOnce() -> Result<T, AppError>,
+{
+    match loader() {
+        Ok(value) => Ok(value),
+        Err(AppError::Config(message)) => {
+            log::warn!(
+                "Failed to load OpenClaw config section '{section_name}' for TUI snapshot: {message}"
+            );
+            Ok(T::default())
+        }
+        Err(err) => Err(err),
+    }
 }
 
 pub(crate) fn load_proxy_config() -> Result<Option<crate::proxy::ProxyConfig>, AppError> {
@@ -753,6 +835,93 @@ mod tests {
             model_ids.get("fallback-only").map(String::as_str),
             Some("shared-model")
         );
+    }
+
+    #[test]
+    #[serial]
+    fn openclaw_config_snapshot_includes_slice_and_warning_data() {
+        let _guard = lock_test_mutex();
+        let temp = tempdir().expect("tempdir");
+        let _home = HomeGuard::set(temp.path());
+
+        let openclaw_dir = temp.path().join("openclaw");
+        std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        let source = r#"{
+  env: {
+    OPENCLAW_ENV_TOKEN: 'demo-token',
+  },
+  tools: {
+    profile: 'unsupported-profile',
+    allow: ['bash'],
+  },
+  agents: {
+    defaults: {
+      timeout: 42,
+      model: {
+        primary: 'demo/main',
+      },
+    },
+  },
+}"#;
+        std::fs::write(openclaw_dir.join("openclaw.json"), source).expect("write openclaw config");
+
+        let state = load_state().expect("load state");
+        let snapshot = load_config_snapshot(&state, &AppType::OpenClaw).expect("load snapshot");
+
+        assert_eq!(snapshot.openclaw_config_dir.as_ref(), Some(&openclaw_dir));
+        assert_eq!(
+            snapshot.openclaw_config_path.as_ref(),
+            Some(&openclaw_dir.join("openclaw.json"))
+        );
+        assert_eq!(
+            snapshot
+                .openclaw_env
+                .as_ref()
+                .and_then(|env| env.vars.get("OPENCLAW_ENV_TOKEN"))
+                .and_then(|value| value.as_str()),
+            Some("demo-token")
+        );
+        assert_eq!(
+            snapshot
+                .openclaw_tools
+                .as_ref()
+                .and_then(|tools| tools.profile.as_deref()),
+            Some("unsupported-profile")
+        );
+        assert_eq!(
+            snapshot
+                .openclaw_agents_defaults
+                .as_ref()
+                .and_then(|defaults| defaults.model.as_ref())
+                .map(|model| model.primary.as_str()),
+            Some("demo/main")
+        );
+        assert!(snapshot
+            .openclaw_warnings
+            .as_ref()
+            .is_some_and(|warnings| warnings.iter().any(|warning| {
+                warning.code == "invalid_tools_profile" || warning.code == "legacy_agents_timeout"
+            })));
+    }
+
+    #[test]
+    #[serial]
+    fn non_openclaw_config_snapshot_leaves_openclaw_fields_unset() {
+        let _guard = lock_test_mutex();
+        let temp = tempdir().expect("tempdir");
+        let _home = HomeGuard::set(temp.path());
+
+        let state = load_state().expect("load state");
+        let snapshot = load_config_snapshot(&state, &AppType::Claude).expect("load snapshot");
+
+        assert!(snapshot.openclaw_config_path.is_none());
+        assert!(snapshot.openclaw_config_dir.is_none());
+        assert!(snapshot.openclaw_env.is_none());
+        assert!(snapshot.openclaw_tools.is_none());
+        assert!(snapshot.openclaw_agents_defaults.is_none());
+        assert!(snapshot.openclaw_warnings.is_none());
     }
 
     #[test]

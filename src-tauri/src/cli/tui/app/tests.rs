@@ -6,6 +6,8 @@ mod tests {
     use crossterm::event::{KeyEvent, KeyModifiers};
     use serde_json::json;
 
+    use crate::cli::i18n::texts;
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -198,7 +200,7 @@ mod tests {
         ));
         assert!(matches!(
             app.on_key(key(KeyCode::Char('[')), &data()),
-            Action::SetAppType(AppType::OpenCode)
+            Action::SetAppType(AppType::OpenClaw)
         ));
     }
 
@@ -213,11 +215,21 @@ mod tests {
         let mut app = App::new(Some(AppType::OpenCode));
         assert!(matches!(
             app.on_key(key(KeyCode::Char(']')), &data()),
-            Action::SetAppType(AppType::Claude)
+            Action::SetAppType(AppType::OpenClaw)
         ));
         assert!(matches!(
             app.on_key(key(KeyCode::Char('[')), &data()),
             Action::SetAppType(AppType::Gemini)
+        ));
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char(']')), &data()),
+            Action::SetAppType(AppType::Claude)
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('[')), &data()),
+            Action::SetAppType(AppType::OpenCode)
         ));
     }
 
@@ -1839,10 +1851,10 @@ mod tests {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Config;
         app.focus = Focus::Content;
-        app.config_idx = ConfigItem::ALL
+        app.config_idx = visible_config_items(&app.filter, &app.app_type)
             .iter()
             .position(|item| matches!(item, ConfigItem::WebDavSync))
-            .expect("WebDavSync missing from ConfigItem::ALL");
+            .expect("WebDavSync should be visible in the filtered config menu");
 
         let data = UiData::default();
         let action = app.on_key(key(KeyCode::Enter), &data);
@@ -1858,6 +1870,264 @@ mod tests {
                 .any(|item| matches!(item, ConfigItem::Proxy)),
             "Config menu should not expose a second proxy control entry"
         );
+    }
+
+    #[test]
+    fn openclaw_config_menu_exposes_env_tools_and_agents_items() {
+        let app = App::new(Some(AppType::OpenClaw));
+        let items = visible_config_items(&app.filter, &app.app_type);
+
+        assert!(items
+            .iter()
+            .any(|item| matches!(item, ConfigItem::OpenClawEnv)));
+        assert!(items
+            .iter()
+            .any(|item| matches!(item, ConfigItem::OpenClawTools)));
+        assert!(items
+            .iter()
+            .any(|item| matches!(item, ConfigItem::OpenClawAgents)));
+    }
+
+    #[test]
+    fn openclaw_config_item_metadata_keeps_visibility_label_route_and_title_aligned() {
+        let cases = [
+            (
+                ConfigItem::OpenClawEnv,
+                texts::tui_config_item_openclaw_env(),
+                texts::tui_openclaw_config_env_title(),
+                Route::ConfigOpenClawEnv,
+            ),
+            (
+                ConfigItem::OpenClawTools,
+                texts::tui_config_item_openclaw_tools(),
+                texts::tui_openclaw_config_tools_title(),
+                Route::ConfigOpenClawTools,
+            ),
+            (
+                ConfigItem::OpenClawAgents,
+                texts::tui_config_item_openclaw_agents_defaults(),
+                texts::tui_openclaw_config_agents_title(),
+                Route::ConfigOpenClawAgents,
+            ),
+        ];
+
+        for (item, label, detail_title, route) in cases {
+            assert!(item.visible_for_app(&AppType::OpenClaw));
+            assert!(!item.visible_for_app(&AppType::Claude));
+            assert_eq!(item.label(), label);
+            assert_eq!(item.detail_title(), Some(detail_title));
+            assert!(matches!(item.detail_route(), Some(actual) if actual == route));
+            assert!(
+                matches!(ConfigItem::from_openclaw_route(&route), Some(actual) if actual == item)
+            );
+        }
+    }
+
+    #[test]
+    fn non_openclaw_config_menu_hides_env_tools_and_agents_items() {
+        let app = App::new(Some(AppType::Claude));
+        let items = visible_config_items(&app.filter, &app.app_type);
+
+        assert!(!items
+            .iter()
+            .any(|item| matches!(item, ConfigItem::OpenClawEnv)));
+        assert!(!items
+            .iter()
+            .any(|item| matches!(item, ConfigItem::OpenClawTools)));
+        assert!(!items
+            .iter()
+            .any(|item| matches!(item, ConfigItem::OpenClawAgents)));
+    }
+
+    #[test]
+    fn openclaw_config_route_env_enter_opens_dedicated_subroute() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::Config;
+        app.focus = Focus::Content;
+        app.config_idx = visible_config_items(&app.filter, &app.app_type)
+            .iter()
+            .position(|item| matches!(item, ConfigItem::OpenClawEnv))
+            .expect("OpenClaw Env config item should be visible");
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        assert!(matches!(
+            action,
+            Action::SwitchRoute(Route::ConfigOpenClawEnv)
+        ));
+        assert!(matches!(app.route, Route::ConfigOpenClawEnv));
+    }
+
+    #[test]
+    fn openclaw_config_route_tools_enter_opens_dedicated_subroute() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::Config;
+        app.focus = Focus::Content;
+        app.config_idx = visible_config_items(&app.filter, &app.app_type)
+            .iter()
+            .position(|item| matches!(item, ConfigItem::OpenClawTools))
+            .expect("OpenClaw Tools config item should be visible");
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        assert!(matches!(
+            action,
+            Action::SwitchRoute(Route::ConfigOpenClawTools)
+        ));
+        assert!(matches!(app.route, Route::ConfigOpenClawTools));
+    }
+
+    #[test]
+    fn openclaw_config_route_agents_enter_opens_dedicated_subroute() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::Config;
+        app.focus = Focus::Content;
+        app.config_idx = visible_config_items(&app.filter, &app.app_type)
+            .iter()
+            .position(|item| matches!(item, ConfigItem::OpenClawAgents))
+            .expect("OpenClaw Agents config item should be visible");
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        assert!(matches!(
+            action,
+            Action::SwitchRoute(Route::ConfigOpenClawAgents)
+        ));
+        assert!(matches!(app.route, Route::ConfigOpenClawAgents));
+    }
+
+    #[test]
+    fn openclaw_config_route_env_enter_opens_env_editor() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawEnv;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_env = Some(crate::openclaw_config::OpenClawEnvConfig {
+            vars: std::collections::HashMap::from([(
+                "OPENCLAW_ENV_TOKEN".to_string(),
+                json!("demo-token"),
+            )]),
+        });
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.editor
+                .as_ref()
+                .map(|editor| (&editor.kind, &editor.submit)),
+            Some((EditorKind::Json, EditorSubmit::ConfigOpenClawEnv))
+        ));
+        assert_eq!(
+            app.editor.as_ref().map(|editor| editor.title.as_str()),
+            Some(texts::tui_openclaw_config_env_editor_title())
+        );
+        assert!(app
+            .editor
+            .as_ref()
+            .expect("env editor should open")
+            .text()
+            .contains("OPENCLAW_ENV_TOKEN"));
+    }
+
+    #[test]
+    fn openclaw_config_route_tools_enter_opens_tools_editor() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+            profile: Some("coding".to_string()),
+            allow: vec!["Read".to_string()],
+            deny: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        });
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.editor
+                .as_ref()
+                .map(|editor| (&editor.kind, &editor.submit)),
+            Some((EditorKind::Json, EditorSubmit::ConfigOpenClawTools))
+        ));
+        assert_eq!(
+            app.editor.as_ref().map(|editor| editor.title.as_str()),
+            Some(texts::tui_openclaw_config_tools_editor_title())
+        );
+        assert!(app
+            .editor
+            .as_ref()
+            .expect("tools editor should open")
+            .text()
+            .contains("coding"));
+    }
+
+    #[test]
+    fn openclaw_config_route_agents_enter_opens_agents_editor() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "gpt-4.1".to_string(),
+                    fallbacks: vec!["gpt-4o-mini".to_string()],
+                    extra: std::collections::HashMap::new(),
+                }),
+                models: None,
+                extra: std::collections::HashMap::new(),
+            });
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.editor
+                .as_ref()
+                .map(|editor| (&editor.kind, &editor.submit)),
+            Some((EditorKind::Json, EditorSubmit::ConfigOpenClawAgents))
+        ));
+        assert_eq!(
+            app.editor.as_ref().map(|editor| editor.title.as_str()),
+            Some(texts::tui_openclaw_config_agents_editor_title())
+        );
+        assert!(app
+            .editor
+            .as_ref()
+            .expect("agents editor should open")
+            .text()
+            .contains("gpt-4.1"));
+    }
+
+    #[test]
+    fn openclaw_config_route_tools_edit_shortcut_opens_tools_editor() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+            profile: Some("messaging".to_string()),
+            allow: vec!["Read".to_string()],
+            deny: vec!["Bash".to_string()],
+            extra: std::collections::HashMap::new(),
+        });
+
+        let action = app.on_key(key(KeyCode::Char('e')), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.editor
+                .as_ref()
+                .map(|editor| (&editor.kind, &editor.submit)),
+            Some((EditorKind::Json, EditorSubmit::ConfigOpenClawTools))
+        ));
     }
 
     #[test]

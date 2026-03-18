@@ -9,8 +9,8 @@ use crate::{
     cli::tui::{
         app,
         app::{
-            App, ConfirmAction, ConfirmOverlay, EditorKind, EditorSubmit, Focus, Overlay,
-            TextInputState, TextSubmit,
+            App, ConfigItem, ConfirmAction, ConfirmOverlay, EditorKind, EditorSubmit, Focus,
+            Overlay, TextInputState, TextSubmit,
         },
         data::{
             ConfigSnapshot, McpSnapshot, PromptsSnapshot, ProviderRow, ProvidersSnapshot,
@@ -2383,6 +2383,148 @@ fn backup_picker_overlay_shows_hint() {
             && all.contains("Esc")
             && (all.contains("restore") || all.contains("恢复")),
         "expected BackupPicker to show Enter/Esc restore hint"
+    );
+}
+
+#[test]
+fn openclaw_config_route_render_uses_dedicated_env_page() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawEnv;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.openclaw_env = Some(crate::openclaw_config::OpenClawEnvConfig {
+        vars: std::collections::HashMap::from([(
+            "OPENCLAW_ENV_TOKEN".to_string(),
+            json!("demo-token"),
+        )]),
+    });
+    data.config.openclaw_warnings = Some(vec![crate::openclaw_config::OpenClawHealthWarning {
+        code: "stringified_env_vars".to_string(),
+        message: "env.vars should be an object".to_string(),
+        path: Some("env.vars".to_string()),
+    }]);
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(matches!(
+        ConfigItem::from_openclaw_route(&app.route),
+        Some(ConfigItem::OpenClawEnv)
+    ));
+    assert!(all.contains(
+        ConfigItem::OpenClawEnv
+            .detail_title()
+            .expect("OpenClaw Env route should have a title")
+    ));
+    assert!(all.contains("OPENCLAW_ENV_TOKEN"));
+    assert!(all.contains(texts::tui_openclaw_config_warning_title()));
+    assert!(all.contains("env.vars"));
+    assert!(!all.contains(super::config_item_label(&ConfigItem::ShowFull)));
+}
+
+#[test]
+fn openclaw_config_warning_banner_shows_backend_warning_copy() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawEnv;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.openclaw_warnings = Some(vec![crate::openclaw_config::OpenClawHealthWarning {
+        code: "stringified_env_vars".to_string(),
+        message: "backend warning copy from scanner".to_string(),
+        path: Some("env.vars".to_string()),
+    }]);
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(all.contains(texts::tui_openclaw_config_warning_title()));
+    assert!(all.contains("backend warning copy from scanner"));
+    assert!(all.contains("env.vars"));
+}
+
+#[test]
+fn openclaw_config_warning_banner_hides_when_health_scan_is_clean() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawTools;
+    app.focus = Focus::Content;
+
+    let data = minimal_data(&app.app_type);
+    let all = all_text(&render(&app, &data));
+
+    assert!(!all.contains(texts::tui_openclaw_config_warning_title()));
+}
+
+#[test]
+fn openclaw_config_warning_global_banner_is_visible_on_all_subroutes() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    for route in [
+        Route::ConfigOpenClawEnv,
+        Route::ConfigOpenClawTools,
+        Route::ConfigOpenClawAgents,
+    ] {
+        let config_path = "/tmp/openclaw/openclaw.json";
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = route;
+        app.focus = Focus::Content;
+
+        let mut data = minimal_data(&app.app_type);
+        data.config.openclaw_config_path = Some(std::path::PathBuf::from(config_path));
+        data.config.openclaw_warnings = Some(vec![crate::openclaw_config::OpenClawHealthWarning {
+            code: "config_parse_failed".to_string(),
+            message: "OpenClaw config could not be parsed as JSON5: trailing comma".to_string(),
+            path: Some(config_path.to_string()),
+        }]);
+
+        let all = all_text(&render(&app, &data));
+
+        assert!(all.contains(texts::tui_openclaw_config_warning_title()));
+        assert!(all.contains("OpenClaw config could not be parsed as JSON5"));
+        assert!(all.contains(config_path));
+    }
+}
+
+#[test]
+fn openclaw_config_item_and_route_titles_follow_i18n_texts() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::Chinese);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut config_app = App::new(Some(AppType::OpenClaw));
+    config_app.route = Route::Config;
+    config_app.focus = Focus::Content;
+    config_app.filter.buffer = "openclaw".to_string();
+    let config_labels = super::config_items_filtered(&config_app)
+        .into_iter()
+        .map(|item| super::config_item_label(&item))
+        .collect::<Vec<_>>();
+
+    assert!(config_labels.contains(&texts::tui_config_item_openclaw_env()));
+    assert!(config_labels.contains(&texts::tui_config_item_openclaw_tools()));
+    assert!(config_labels.contains(&texts::tui_config_item_openclaw_agents_defaults()));
+    assert!(!config_labels.contains(&"OpenClaw Env"));
+    assert!(!config_labels.contains(&"OpenClaw Tools"));
+
+    let mut route_app = App::new(Some(AppType::OpenClaw));
+    route_app.route = Route::ConfigOpenClawAgents;
+    route_app.focus = Focus::Content;
+    assert_eq!(
+        ConfigItem::OpenClawAgents.detail_title(),
+        Some(texts::tui_openclaw_config_agents_title())
+    );
+    assert_ne!(
+        ConfigItem::OpenClawAgents.detail_title(),
+        Some("OpenClaw Agents Defaults")
     );
 }
 

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::{OnceLock, RwLock};
 use url::Url;
 
+use crate::app_config::AppType;
 use crate::error::AppError;
 
 /// 自定义端点配置
@@ -182,6 +183,16 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openclaw_config_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_provider_claude: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_provider_codex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_provider_gemini: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_provider_opencode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_provider_openclaw: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     /// 是否开机自启
     #[serde(default)]
@@ -223,6 +234,11 @@ impl Default for AppSettings {
             gemini_config_dir: None,
             opencode_config_dir: None,
             openclaw_config_dir: None,
+            current_provider_claude: None,
+            current_provider_codex: None,
+            current_provider_gemini: None,
+            current_provider_opencode: None,
+            current_provider_openclaw: None,
             language: None,
             launch_on_startup: false,
             skill_sync_method: crate::services::skill::SyncMethod::default(),
@@ -426,6 +442,52 @@ pub fn get_openclaw_override_dir() -> Option<PathBuf> {
         .openclaw_config_dir
         .as_ref()
         .map(|p| resolve_override_path(p))
+}
+
+pub fn get_current_provider(app_type: &AppType) -> Option<String> {
+    let settings = settings_store().read().ok()?;
+    match app_type {
+        AppType::Claude => settings.current_provider_claude.clone(),
+        AppType::Codex => settings.current_provider_codex.clone(),
+        AppType::Gemini => settings.current_provider_gemini.clone(),
+        AppType::OpenCode => settings.current_provider_opencode.clone(),
+        AppType::OpenClaw => settings.current_provider_openclaw.clone(),
+    }
+}
+
+pub fn set_current_provider(app_type: &AppType, id: Option<&str>) -> Result<(), AppError> {
+    let mut settings = get_settings();
+
+    match app_type {
+        AppType::Claude => settings.current_provider_claude = id.map(|value| value.to_string()),
+        AppType::Codex => settings.current_provider_codex = id.map(|value| value.to_string()),
+        AppType::Gemini => settings.current_provider_gemini = id.map(|value| value.to_string()),
+        AppType::OpenCode => settings.current_provider_opencode = id.map(|value| value.to_string()),
+        AppType::OpenClaw => settings.current_provider_openclaw = id.map(|value| value.to_string()),
+    }
+
+    update_settings(settings)
+}
+
+pub fn get_effective_current_provider(
+    db: &crate::database::Database,
+    app_type: &AppType,
+) -> Result<Option<String>, AppError> {
+    if let Some(local_id) = get_current_provider(app_type) {
+        let providers = db.get_all_providers(app_type.as_str())?;
+        if providers.contains_key(&local_id) {
+            return Ok(Some(local_id));
+        }
+
+        log::warn!(
+            "本地 settings 中的供应商 {} ({}) 在数据库中不存在，将清理并 fallback 到数据库",
+            local_id,
+            app_type.as_str()
+        );
+        set_current_provider(app_type, None)?;
+    }
+
+    db.get_current_provider(app_type.as_str())
 }
 
 pub fn get_skill_sync_method() -> crate::services::skill::SyncMethod {

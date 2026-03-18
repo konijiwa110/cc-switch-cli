@@ -2833,6 +2833,30 @@ pub mod texts {
         }
     }
 
+    pub fn tui_config_item_openclaw_env() -> &'static str {
+        if is_chinese() {
+            "OpenClaw 环境变量"
+        } else {
+            "OpenClaw Env"
+        }
+    }
+
+    pub fn tui_config_item_openclaw_tools() -> &'static str {
+        if is_chinese() {
+            "OpenClaw 工具设置"
+        } else {
+            "OpenClaw Tools"
+        }
+    }
+
+    pub fn tui_config_item_openclaw_agents_defaults() -> &'static str {
+        if is_chinese() {
+            "OpenClaw 默认 Agent 配置"
+        } else {
+            "OpenClaw Agents Defaults"
+        }
+    }
+
     pub fn tui_config_item_webdav_sync() -> &'static str {
         if is_chinese() {
             "WebDAV 同步"
@@ -2902,6 +2926,106 @@ pub mod texts {
             "WebDAV 同步"
         } else {
             "WebDAV Sync"
+        }
+    }
+
+    pub fn tui_openclaw_config_env_title() -> &'static str {
+        tui_config_item_openclaw_env()
+    }
+
+    pub fn tui_openclaw_config_tools_title() -> &'static str {
+        tui_config_item_openclaw_tools()
+    }
+
+    pub fn tui_openclaw_config_agents_title() -> &'static str {
+        tui_config_item_openclaw_agents_defaults()
+    }
+
+    pub fn tui_openclaw_config_env_editor_title() -> &'static str {
+        if is_chinese() {
+            "编辑 OpenClaw 环境变量 (JSON)"
+        } else {
+            "Edit OpenClaw Env (JSON)"
+        }
+    }
+
+    pub fn tui_openclaw_config_tools_editor_title() -> &'static str {
+        if is_chinese() {
+            "编辑 OpenClaw 工具设置 (JSON)"
+        } else {
+            "Edit OpenClaw Tools (JSON)"
+        }
+    }
+
+    pub fn tui_openclaw_config_agents_editor_title() -> &'static str {
+        if is_chinese() {
+            "编辑 OpenClaw 默认 Agent 配置 (JSON)"
+        } else {
+            "Edit OpenClaw Agents Defaults (JSON)"
+        }
+    }
+
+    pub fn tui_openclaw_config_warning_title() -> &'static str {
+        if is_chinese() {
+            "OpenClaw 配置告警"
+        } else {
+            "OpenClaw Health Warnings"
+        }
+    }
+
+    pub fn tui_openclaw_config_file_label() -> &'static str {
+        if is_chinese() {
+            "配置文件"
+        } else {
+            "Config file"
+        }
+    }
+
+    pub fn tui_openclaw_config_section_label() -> &'static str {
+        if is_chinese() {
+            "当前配置"
+        } else {
+            "Section"
+        }
+    }
+
+    pub fn tui_openclaw_config_warning_state_label() -> &'static str {
+        if is_chinese() {
+            "告警状态"
+        } else {
+            "Warnings"
+        }
+    }
+
+    pub fn tui_openclaw_config_warning_present() -> &'static str {
+        if is_chinese() {
+            "发现告警"
+        } else {
+            "Warnings detected"
+        }
+    }
+
+    pub fn tui_openclaw_config_warning_clean() -> &'static str {
+        if is_chinese() {
+            "正常"
+        } else {
+            "Healthy"
+        }
+    }
+
+    pub fn tui_openclaw_config_path_not_available() -> &'static str {
+        if is_chinese() {
+            "不可用"
+        } else {
+            "n/a"
+        }
+    }
+
+    pub fn tui_toast_openclaw_config_saved(section: &str) -> String {
+        if is_chinese() {
+            format!("已保存 {section}")
+        } else {
+            format!("Saved {section}")
         }
     }
 

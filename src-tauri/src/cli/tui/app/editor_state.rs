@@ -6,7 +6,7 @@ pub enum EditorKind {
     Json,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum EditorSubmit {
     PromptEdit { id: String },
     ProviderFormApplyJson,
@@ -18,6 +18,9 @@ pub enum EditorSubmit {
     McpAdd,
     McpEdit { id: String },
     ConfigCommonSnippet { app_type: AppType },
+    ConfigOpenClawEnv,
+    ConfigOpenClawTools,
+    ConfigOpenClawAgents,
     ConfigWebDavSettings,
 }
 

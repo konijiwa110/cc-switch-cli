@@ -137,6 +137,57 @@ mod services {
             Copy,
         }
     }
+
+    pub mod webdav {
+        use crate::error::AppError;
+        use url::Url;
+
+        pub fn parse_base_url(raw: &str) -> Result<Url, AppError> {
+            let trimmed = raw.trim().trim_end_matches('/');
+            let url = Url::parse(trimmed).map_err(|e| {
+                AppError::InvalidInput(format!("WebDAV base_url 不是合法 URL: {e}"))
+            })?;
+            let scheme = url.scheme();
+            if scheme != "http" && scheme != "https" {
+                return Err(AppError::InvalidInput(
+                    "WebDAV base_url 仅支持 http/https".to_string(),
+                ));
+            }
+
+            validate_provider_base_url(&url)?;
+            Ok(url)
+        }
+
+        fn validate_provider_base_url(url: &Url) -> Result<(), AppError> {
+            let Some((provider_name, dav_example)) = detect_provider(url) else {
+                return Ok(());
+            };
+
+            let points_under_dav = url
+                .path_segments()
+                .and_then(|mut segments| segments.next())
+                .is_some_and(|segment| segment == "dav");
+            if points_under_dav {
+                return Ok(());
+            }
+
+            Err(AppError::InvalidInput(format!(
+                "{provider_name} WebDAV base_url 必须指向 /dav 下的目录，例如 {dav_example}"
+            )))
+        }
+
+        fn detect_provider(url: &Url) -> Option<(&'static str, &'static str)> {
+            match url.host_str()? {
+                host if host.eq_ignore_ascii_case("dav.jianguoyun.com") => {
+                    Some(("坚果云", "https://dav.jianguoyun.com/dav/..."))
+                }
+                host if host.eq_ignore_ascii_case("dav.nutstore.net") => {
+                    Some(("Nutstore", "https://dav.nutstore.net/dav/..."))
+                }
+                _ => None,
+            }
+        }
+    }
 }
 
 #[path = "../src/settings.rs"]

@@ -372,7 +372,7 @@ impl App {
         }
     }
     pub(crate) fn clamp_selections(&mut self, data: &UiData) {
-        let providers_len = visible_providers(&self.filter, data).len();
+        let providers_len = visible_providers(&self.app_type, &self.filter, data).len();
         if providers_len == 0 {
             self.provider_idx = 0;
         } else {

@@ -269,7 +269,7 @@ fn current_timestamp() -> i64 {
 
 fn display_path_with_tilde(path: &Path) -> String {
     let display = path.display().to_string();
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::config::home_dir() else {
         return display;
     };
     let home = home.display().to_string();
@@ -458,7 +458,7 @@ pub(super) fn stream_check(ctx: &mut RuntimeActionContext<'_>, id: String) -> Re
     let req = StreamCheckReq {
         app_type: ctx.app.app_type.clone(),
         provider_id: row.id.clone(),
-        provider_name: row.provider.name.clone(),
+        provider_name: crate::cli::tui::data::provider_display_name(&ctx.app.app_type, row),
         provider: row.provider.clone(),
     };
 
@@ -538,20 +538,28 @@ mod tests {
     use crate::cli::tui::terminal::TuiTerminal;
     use crate::provider::Provider;
     use crate::settings::{get_settings, update_settings, AppSettings};
+    use crate::test_support::{
+        lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
+    };
     use crate::{AppType, MultiAppConfig};
 
     struct EnvGuard {
+        _lock: TestHomeSettingsLock,
         old_home: Option<OsString>,
         old_userprofile: Option<OsString>,
     }
 
     impl EnvGuard {
         fn set_home(home: &Path) -> Self {
+            let lock = lock_test_home_and_settings();
             let old_home = std::env::var_os("HOME");
             let old_userprofile = std::env::var_os("USERPROFILE");
             std::env::set_var("HOME", home);
             std::env::set_var("USERPROFILE", home);
+            set_test_home_override(Some(home));
+            crate::settings::reload_test_settings();
             Self {
+                _lock: lock,
                 old_home,
                 old_userprofile,
             }
@@ -568,6 +576,8 @@ mod tests {
                 Some(value) => std::env::set_var("USERPROFILE", value),
                 None => std::env::remove_var("USERPROFILE"),
             }
+            set_test_home_override(self.old_home.as_deref().map(Path::new));
+            crate::settings::reload_test_settings();
         }
     }
 
@@ -705,14 +715,21 @@ mod tests {
         )
     }
 
+    struct SwitchFixture {
+        _temp_home: TempDir,
+        _env: EnvGuard,
+        app: App,
+        data: UiData,
+    }
+
     fn run_codex_switch(
         current_id: &str,
         config_text: Option<&str>,
         auth: Option<serde_json::Value>,
         shared_tip_shown: bool,
-    ) -> Result<(App, UiData), AppError> {
+    ) -> Result<SwitchFixture, AppError> {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let env = EnvGuard::set_home(temp_home.path());
 
         let mut settings = crate::settings::get_settings();
         settings.provider_switch_common_config_tip_shown_codex = shared_tip_shown;
@@ -747,7 +764,12 @@ mod tests {
 
         switch(&mut ctx, "new-provider".to_string())?;
 
-        Ok((app, data))
+        Ok(SwitchFixture {
+            _temp_home: temp_home,
+            _env: env,
+            app,
+            data,
+        })
     }
 
     fn seed_claude_live_settings(value: serde_json::Value) -> Result<(), AppError> {
@@ -768,9 +790,9 @@ mod tests {
         api_format: &str,
         seed_live: bool,
         shared_tip_shown: bool,
-    ) -> Result<(App, UiData), AppError> {
+    ) -> Result<SwitchFixture, AppError> {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let env = EnvGuard::set_home(temp_home.path());
 
         let mut settings = crate::settings::get_settings();
         settings.provider_switch_common_config_tip_shown = shared_tip_shown;
@@ -814,13 +836,18 @@ mod tests {
 
         switch(&mut ctx, "proxy-provider".to_string())?;
 
-        Ok((app, data))
+        Ok(SwitchFixture {
+            _temp_home: temp_home,
+            _env: env,
+            app,
+            data,
+        })
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_does_not_show_restart_toast_when_live_sync_succeeds() {
-        let (app, data) = run_codex_switch(
+        let fixture = run_codex_switch(
             "old-provider",
             Some("model_provider = \"legacy\"\nmodel = \"gpt-4\"\n"),
             Some(json!({"OPENAI_API_KEY": "legacy-key"})),
@@ -828,30 +855,30 @@ mod tests {
         )
         .expect("switch should succeed");
 
-        assert_eq!(data.providers.current_id, "new-provider");
+        assert_eq!(fixture.data.providers.current_id, "new-provider");
         assert!(
-            app.toast.is_none(),
+            fixture.app.toast.is_none(),
             "provider switch should not show restart toast"
         );
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_does_not_show_restart_toast_when_live_sync_is_skipped() {
-        let (app, data) =
+        let fixture =
             run_codex_switch("old-provider", None, None, true).expect("switch should succeed");
 
-        assert_eq!(data.providers.current_id, "new-provider");
+        assert_eq!(fixture.data.providers.current_id, "new-provider");
         assert!(
-            app.toast.is_none(),
+            fixture.app.toast.is_none(),
             "provider switch should not show restart toast"
         );
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_shows_first_use_guard_before_overwriting_existing_codex_settings() {
-        let (app, data) = run_codex_switch(
+        let fixture = run_codex_switch(
             "",
             Some("model_provider = \"legacy\"\nmodel = \"gpt-4\"\n"),
             None,
@@ -859,9 +886,9 @@ mod tests {
         )
         .expect("guarded switch should succeed");
 
-        assert_eq!(data.providers.current_id, "");
+        assert_eq!(fixture.data.providers.current_id, "");
         assert!(matches!(
-            app.overlay,
+            fixture.app.overlay,
             Overlay::ProviderSwitchFirstUseConfirm {
                 provider_id,
                 title,
@@ -875,18 +902,18 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_first_use_without_existing_codex_settings_switches_normally() {
-        let (app, data) = run_codex_switch("", None, None, false).expect("switch should succeed");
+        let fixture = run_codex_switch("", None, None, false).expect("switch should succeed");
 
-        assert_eq!(data.providers.current_id, "new-provider");
-        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(fixture.data.providers.current_id, "new-provider");
+        assert!(matches!(fixture.app.overlay, Overlay::None));
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_codex_auth_only_state_does_not_trigger_first_use_guard() {
-        let (app, data) = run_codex_switch(
+        let fixture = run_codex_switch(
             "",
             None,
             Some(json!({"OPENAI_API_KEY": "legacy-key"})),
@@ -894,14 +921,14 @@ mod tests {
         )
         .expect("switch should succeed");
 
-        assert_eq!(data.providers.current_id, "new-provider");
-        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(fixture.data.providers.current_id, "new-provider");
+        assert!(matches!(fixture.app.overlay, Overlay::None));
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_existing_codex_install_with_current_provider_skips_first_use_guard() {
-        let (app, data) = run_codex_switch(
+        let fixture = run_codex_switch(
             "old-provider",
             Some("model_provider = \"legacy\"\nmodel = \"gpt-4\"\n"),
             None,
@@ -909,12 +936,12 @@ mod tests {
         )
         .expect("switch should succeed");
 
-        assert_eq!(data.providers.current_id, "new-provider");
-        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(fixture.data.providers.current_id, "new-provider");
+        assert!(matches!(fixture.app.overlay, Overlay::None));
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_import_codex_live_config_succeeds_without_auth_json() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = EnvGuard::set_home(temp_home.path());
@@ -966,9 +993,9 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn codex_provider_switch_shows_one_time_shared_config_tip_after_first_real_switch() {
-        let (app, data) = run_codex_switch(
+        let fixture = run_codex_switch(
             "old-provider",
             Some("model_provider = \"legacy\"\nmodel = \"gpt-4\"\n"),
             Some(json!({"OPENAI_API_KEY": "legacy-key"})),
@@ -976,9 +1003,9 @@ mod tests {
         )
         .expect("switch should succeed");
 
-        assert_eq!(data.providers.current_id, "new-provider");
+        assert_eq!(fixture.data.providers.current_id, "new-provider");
         assert!(matches!(
-            app.overlay,
+            fixture.app.overlay,
             Overlay::Confirm(ConfirmOverlay {
                 title,
                 message,
@@ -990,14 +1017,14 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_warns_when_claude_provider_requires_proxy_and_proxy_is_not_running() {
-        let (overlay, current_id) = run_claude_switch("old-provider", "openai_chat", false, false)
+        let fixture = run_claude_switch("old-provider", "openai_chat", false, false)
             .expect("switch should succeed");
 
-        assert_eq!(current_id.providers.current_id, "proxy-provider");
+        assert_eq!(fixture.data.providers.current_id, "proxy-provider");
         assert!(matches!(
-            overlay.overlay,
+            fixture.app.overlay,
             Overlay::Confirm(ConfirmOverlay { title, message, action })
                 if title == texts::tui_claude_api_format_requires_proxy_title()
                     && message == texts::tui_claude_api_format_requires_proxy_message("openai_chat")
@@ -1006,15 +1033,14 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_warns_for_openai_responses_when_proxy_is_not_running() {
-        let (overlay, current_id) =
-            run_claude_switch("old-provider", "openai_responses", false, false)
-                .expect("switch should succeed");
+        let fixture = run_claude_switch("old-provider", "openai_responses", false, false)
+            .expect("switch should succeed");
 
-        assert_eq!(current_id.providers.current_id, "proxy-provider");
+        assert_eq!(fixture.data.providers.current_id, "proxy-provider");
         assert!(matches!(
-            overlay.overlay,
+            fixture.app.overlay,
             Overlay::Confirm(ConfirmOverlay { title, message, action })
                 if title == texts::tui_claude_api_format_requires_proxy_title()
                     && message == texts::tui_claude_api_format_requires_proxy_message("openai_responses")
@@ -1041,24 +1067,24 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_does_not_warn_when_claude_provider_uses_anthropic_format() {
-        let (overlay, current_id) = run_claude_switch("old-provider", "anthropic", false, true)
+        let fixture = run_claude_switch("old-provider", "anthropic", false, true)
             .expect("switch should succeed");
 
-        assert_eq!(current_id.providers.current_id, "proxy-provider");
-        assert!(matches!(overlay.overlay, Overlay::None));
+        assert_eq!(fixture.data.providers.current_id, "proxy-provider");
+        assert!(matches!(fixture.app.overlay, Overlay::None));
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_shows_first_use_guard_before_overwriting_existing_claude_settings() {
-        let (app, data) =
+        let fixture =
             run_claude_switch("", "anthropic", true, false).expect("guarded switch should succeed");
 
-        assert_eq!(data.providers.current_id, "");
+        assert_eq!(fixture.data.providers.current_id, "");
         assert!(matches!(
-            app.overlay,
+            fixture.app.overlay,
             Overlay::ProviderSwitchFirstUseConfirm {
                 provider_id,
                 title,
@@ -1072,27 +1098,27 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_first_use_without_existing_claude_settings_switches_normally() {
-        let (app, data) =
+        let fixture =
             run_claude_switch("", "anthropic", false, false).expect("switch should succeed");
 
-        assert_eq!(data.providers.current_id, "proxy-provider");
-        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(fixture.data.providers.current_id, "proxy-provider");
+        assert!(matches!(fixture.app.overlay, Overlay::None));
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_existing_install_with_current_provider_skips_first_use_guard() {
-        let (app, data) = run_claude_switch("old-provider", "anthropic", true, true)
+        let fixture = run_claude_switch("old-provider", "anthropic", true, true)
             .expect("switch should succeed");
 
-        assert_eq!(data.providers.current_id, "proxy-provider");
-        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(fixture.data.providers.current_id, "proxy-provider");
+        assert!(matches!(fixture.app.overlay, Overlay::None));
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_import_live_config_adds_and_selects_imported_provider() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = EnvGuard::set_home(temp_home.path());
@@ -1152,14 +1178,14 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_shows_one_time_shared_config_tip_after_first_real_switch() {
-        let (app, data) = run_claude_switch("old-provider", "anthropic", true, false)
+        let fixture = run_claude_switch("old-provider", "anthropic", true, false)
             .expect("switch should succeed");
 
-        assert_eq!(data.providers.current_id, "proxy-provider");
+        assert_eq!(fixture.data.providers.current_id, "proxy-provider");
         assert!(matches!(
-            app.overlay,
+            fixture.app.overlay,
             Overlay::Confirm(ConfirmOverlay {
                 title,
                 message,
@@ -1171,21 +1197,21 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_queues_shared_config_tip_behind_proxy_notice() {
-        let (app, data) = run_claude_switch("old-provider", "openai_chat", true, false)
+        let fixture = run_claude_switch("old-provider", "openai_chat", true, false)
             .expect("switch should succeed");
 
-        assert_eq!(data.providers.current_id, "proxy-provider");
+        assert_eq!(fixture.data.providers.current_id, "proxy-provider");
         assert!(matches!(
-            app.overlay,
+            fixture.app.overlay,
             Overlay::Confirm(ConfirmOverlay {
                 action: ConfirmAction::ProviderApiFormatProxyNotice,
                 ..
             })
         ));
         assert!(matches!(
-            app.pending_overlay,
+            fixture.app.pending_overlay,
             Some(Overlay::Confirm(ConfirmOverlay {
                 action: ConfirmAction::ProviderSwitchSharedConfigNotice,
                 ..
@@ -1194,7 +1220,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn openclaw_set_default_model_preserves_provider_model_order_as_fallbacks() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = EnvGuard::set_home(temp_home.path());
@@ -1278,7 +1304,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn openclaw_set_default_model_uses_live_primary_when_snapshot_primary_is_stale() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = EnvGuard::set_home(temp_home.path());
@@ -1368,7 +1394,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn openclaw_set_default_model_preserves_existing_extra_fields() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = EnvGuard::set_home(temp_home.path());
@@ -1452,7 +1478,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn openclaw_remove_from_config_rejects_default_provider_even_without_ui_guard() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = EnvGuard::set_home(temp_home.path());
@@ -1509,7 +1535,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn openclaw_remove_from_config_rejects_fallback_only_provider_even_without_ui_guard() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = EnvGuard::set_home(temp_home.path());
@@ -1574,7 +1600,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn openclaw_set_default_model_uses_live_primary_when_snapshot_model_is_missing() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = EnvGuard::set_home(temp_home.path());

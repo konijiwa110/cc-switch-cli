@@ -978,7 +978,24 @@ impl ProviderService {
                 ));
             }
 
-            let is_current = app_type_clone.is_additive_mode() || manager.current == provider_id;
+            let is_current = if matches!(app_type_clone, AppType::OpenClaw) {
+                match crate::openclaw_config::get_provider(&provider_id) {
+                    Ok(Some(_)) => true,
+                    Ok(None) => false,
+                    Err(AppError::Config(message))
+                        if message.starts_with("Failed to parse OpenClaw config as JSON5:") =>
+                    {
+                        log::warn!(
+                            "skip OpenClaw live membership detection for provider '{}' because openclaw.json is not parseable; treating update as snapshot-only",
+                            provider_id
+                        );
+                        false
+                    }
+                    Err(err) => return Err(err),
+                }
+            } else {
+                app_type_clone.is_additive_mode() || manager.current == provider_id
+            };
             let mut merged = if let Some(existing) = manager.providers.get(&provider_id) {
                 let mut updated = provider_clone.clone();
                 match (existing.meta.as_ref(), updated.meta.take()) {
@@ -1351,7 +1368,30 @@ impl ProviderService {
             result
         };
 
+        let openclaw_live_provider_ids = match crate::openclaw_config::get_providers() {
+            Ok(providers) => Some(
+                providers
+                    .into_iter()
+                    .map(|(provider_id, _)| provider_id)
+                    .collect::<std::collections::HashSet<_>>(),
+            ),
+            Err(err) => {
+                log::warn!(
+                    "sync_current_to_live: 读取 OpenClaw live providers 失败，跳过 OpenClaw 同步: {err}"
+                );
+                None
+            }
+        };
+
         for (app_type, provider, snippet) in &snapshots {
+            if matches!(app_type, AppType::OpenClaw)
+                && !openclaw_live_provider_ids
+                    .as_ref()
+                    .is_some_and(|provider_ids| provider_ids.contains(&provider.id))
+            {
+                continue;
+            }
+
             if let Err(e) = Self::write_live_snapshot(app_type, provider, snippet.as_deref(), true)
             {
                 log::warn!("sync_current_to_live: 写入 {app_type} live 配置失败: {e}");
@@ -1410,7 +1450,7 @@ impl ProviderService {
                     app_type: app_type_clone.clone(),
                     provider,
                     backup: Self::capture_live_snapshot(&app_type_clone)?,
-                    sync_mcp: true,
+                    sync_mcp: matches!(app_type_clone, AppType::OpenCode),
                     refresh_snapshot: false,
                     common_config_snippet: config
                         .common_config_snippets

@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{OnceLock, RwLock};
+
+use crate::config::home_dir;
 use url::Url;
 
 use crate::app_config::AppType;
@@ -263,7 +265,7 @@ impl AppSettings {
     fn settings_path() -> PathBuf {
         // settings.json 必须使用固定路径，不能被 app_config_dir 覆盖
         // 否则会造成循环依赖：读取 settings 需要知道路径，但路径在 settings 中
-        dirs::home_dir()
+        home_dir()
             .expect("无法获取用户主目录")
             .join(".cc-switch")
             .join("settings.json")
@@ -360,17 +362,23 @@ fn settings_store() -> &'static RwLock<AppSettings> {
     STORE.get_or_init(|| RwLock::new(AppSettings::load()))
 }
 
+#[cfg(test)]
+pub(crate) fn reload_test_settings() {
+    let mut guard = settings_store().write().expect("写入设置锁失败");
+    *guard = AppSettings::load();
+}
+
 fn resolve_override_path(raw: &str) -> PathBuf {
     if raw == "~" {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = home_dir() {
             return home;
         }
     } else if let Some(stripped) = raw.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = home_dir() {
             return home.join(stripped);
         }
     } else if let Some(stripped) = raw.strip_prefix("~\\") {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = home_dir() {
             return home.join(stripped);
         }
     }

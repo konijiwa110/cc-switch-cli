@@ -338,7 +338,7 @@ fn build_openclaw_settings(request: &DeepLinkImportRequest) -> serde_json::Value
     if let Some(api_key) = &request.api_key {
         settings.insert("apiKey".to_string(), json!(api_key));
     }
-    settings.insert("api".to_string(), json!("openai"));
+    settings.insert("api".to_string(), json!("openai-completions"));
 
     if let Some(model) = request
         .model
@@ -403,6 +403,7 @@ pub fn parse_and_merge_config(
         "codex" => merge_codex_config(&mut merged, &config_value)?,
         "gemini" => merge_gemini_config(&mut merged, &config_value)?,
         "opencode" => merge_additive_config(&mut merged, &config_value)?,
+        "openclaw" => merge_additive_config(&mut merged, &config_value)?,
         "" => return Ok(merged),
         other => return Err(AppError::InvalidInput(format!("Invalid app type: {other}"))),
     }

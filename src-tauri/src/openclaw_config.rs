@@ -1,4 +1,4 @@
-use crate::config::{atomic_write, get_app_config_dir};
+use crate::config::{atomic_write, get_app_config_dir, home_dir};
 use crate::error::AppError;
 use crate::provider::OpenClawProviderConfig;
 use crate::settings::{effective_backup_retain_count, get_openclaw_override_dir};
@@ -24,7 +24,7 @@ pub fn get_openclaw_dir() -> PathBuf {
         return override_dir;
     }
 
-    dirs::home_dir()
+    home_dir()
         .map(|home| home.join(".openclaw"))
         .unwrap_or_else(|| PathBuf::from(".openclaw"))
 }
@@ -666,6 +666,168 @@ fn remove_legacy_timeout(defaults_value: &mut Value) {
     }
 }
 
+fn default_model_from_config(config: &Value) -> Result<Option<OpenClawDefaultModel>, AppError> {
+    let Some(model_value) = config
+        .get("agents")
+        .and_then(|agents| agents.get("defaults"))
+        .and_then(|defaults| defaults.get("model"))
+    else {
+        return Ok(None);
+    };
+
+    let model = serde_json::from_value(model_value.clone())
+        .map_err(|e| AppError::Config(format!("Failed to parse agents.defaults.model: {e}")))?;
+    Ok(Some(model))
+}
+
+enum DanglingDefaultModelRef {
+    InvalidFormat {
+        model_ref: String,
+    },
+    MissingProvider {
+        model_ref: String,
+        provider_id: String,
+    },
+    MissingModel {
+        model_ref: String,
+        provider_id: String,
+        model_id: String,
+    },
+}
+
+fn provider_contains_model_id(provider_value: &Value, model_id: &str) -> bool {
+    provider_value
+        .get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|model| model.get("id").and_then(Value::as_str) == Some(model_id))
+}
+
+fn parse_default_model_ref(model_ref: &str) -> Option<(&str, &str)> {
+    let (provider_id, model_id) = model_ref.split_once('/')?;
+    if provider_id.is_empty() || model_id.is_empty() || model_id.contains('/') {
+        return None;
+    }
+    Some((provider_id, model_id))
+}
+
+fn classify_default_model_ref(
+    providers: &Map<String, Value>,
+    model_ref: &str,
+) -> Option<DanglingDefaultModelRef> {
+    let (provider_id, model_id) = parse_default_model_ref(model_ref)?;
+    let Some(provider_value) = providers.get(provider_id) else {
+        return Some(DanglingDefaultModelRef::MissingProvider {
+            model_ref: model_ref.to_string(),
+            provider_id: provider_id.to_string(),
+        });
+    };
+
+    if provider_contains_model_id(provider_value, model_id) {
+        None
+    } else {
+        Some(DanglingDefaultModelRef::MissingModel {
+            model_ref: model_ref.to_string(),
+            provider_id: provider_id.to_string(),
+            model_id: model_id.to_string(),
+        })
+    }
+}
+
+fn first_dangling_default_model_ref(
+    config: &Value,
+) -> Result<Option<DanglingDefaultModelRef>, AppError> {
+    let providers = config
+        .get("models")
+        .and_then(|models| models.get("providers"))
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    if let Some(default_model) = default_model_from_config(config)? {
+        for model_ref in std::iter::once(default_model.primary.as_str())
+            .chain(default_model.fallbacks.iter().map(String::as_str))
+        {
+            match parse_default_model_ref(model_ref) {
+                Some(_) => {
+                    if let Some(dangling) = classify_default_model_ref(&providers, model_ref) {
+                        return Ok(Some(dangling));
+                    }
+                }
+                None => {
+                    return Ok(Some(DanglingDefaultModelRef::InvalidFormat {
+                        model_ref: model_ref.to_string(),
+                    }));
+                }
+            }
+        }
+    }
+
+    if let Some(model_catalog) = config
+        .get("agents")
+        .and_then(|agents| agents.get("defaults"))
+        .and_then(|defaults| defaults.get("models"))
+        .and_then(Value::as_object)
+    {
+        for model_ref in model_catalog.keys() {
+            match parse_default_model_ref(model_ref) {
+                Some(_) => {
+                    if let Some(dangling) = classify_default_model_ref(&providers, model_ref) {
+                        return Ok(Some(dangling));
+                    }
+                }
+                None => {
+                    return Ok(Some(DanglingDefaultModelRef::InvalidFormat {
+                        model_ref: model_ref.clone(),
+                    }));
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn reject_dangling_default_model_refs(config: &Value) -> Result<(), AppError> {
+    let Some(dangling) = first_dangling_default_model_ref(config)? else {
+        return Ok(());
+    };
+
+    Err(match dangling {
+        DanglingDefaultModelRef::InvalidFormat { model_ref } => AppError::localized(
+            "openclaw.default_model.invalid_reference",
+            format!("OpenClaw 默认模型引用格式无效，必须使用 provider/model：{model_ref}"),
+            format!("OpenClaw default model reference must use provider/model format: {model_ref}"),
+        ),
+        DanglingDefaultModelRef::MissingProvider {
+            model_ref,
+            provider_id,
+        } => AppError::localized(
+            "openclaw.default_model.provider_missing",
+            format!(
+                "不能让 OpenClaw 默认模型引用悬空：缺少 provider `{provider_id}`（{model_ref}）"
+            ),
+            format!(
+                "Cannot leave OpenClaw default model dangling: missing provider `{provider_id}` ({model_ref})"
+            ),
+        ),
+        DanglingDefaultModelRef::MissingModel {
+            model_ref,
+            provider_id,
+            model_id,
+        } => AppError::localized(
+            "openclaw.default_model.provider_model_missing",
+            format!(
+                "不能让 OpenClaw 默认模型引用悬空：provider `{provider_id}` 缺少模型 `{model_id}`（{model_ref}）"
+            ),
+            format!(
+                "Cannot leave OpenClaw default model dangling: provider `{provider_id}` is missing model `{model_id}` ({model_ref})"
+            ),
+        ),
+    })
+}
+
 pub fn get_providers() -> Result<Map<String, Value>, AppError> {
     let config = read_openclaw_config()?;
     Ok(config
@@ -682,19 +844,23 @@ pub fn get_provider(id: &str) -> Result<Option<Value>, AppError> {
 
 pub fn set_provider(id: &str, provider_config: Value) -> Result<OpenClawWriteOutcome, AppError> {
     let mut full_config = read_openclaw_config()?;
-    let root = ensure_object(&mut full_config);
-    let models = root.entry("models".to_string()).or_insert_with(|| {
-        json!({
-            "mode": "merge",
-            "providers": {}
-        })
-    });
-    let providers = ensure_object(models)
-        .entry("providers".to_string())
-        .or_insert_with(|| Value::Object(Map::new()));
-    ensure_object(providers).insert(id.to_string(), provider_config);
+    {
+        let root = ensure_object(&mut full_config);
+        let models = root.entry("models".to_string()).or_insert_with(|| {
+            json!({
+                "mode": "merge",
+                "providers": {}
+            })
+        });
+        let providers = ensure_object(models)
+            .entry("providers".to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        ensure_object(providers).insert(id.to_string(), provider_config);
+    }
 
-    let models_value = root.get("models").cloned().unwrap_or_else(|| {
+    reject_dangling_default_model_refs(&full_config)?;
+
+    let models_value = full_config.get("models").cloned().unwrap_or_else(|| {
         json!({
             "mode": "merge",
             "providers": {}
@@ -719,6 +885,8 @@ pub fn remove_provider(id: &str) -> Result<OpenClawWriteOutcome, AppError> {
         return Ok(OpenClawWriteOutcome::default());
     }
 
+    reject_dangling_default_model_refs(&config)?;
+
     let models_value = config.get("models").cloned().unwrap_or_else(|| {
         json!({
             "mode": "merge",
@@ -730,18 +898,7 @@ pub fn remove_provider(id: &str) -> Result<OpenClawWriteOutcome, AppError> {
 
 pub fn get_default_model() -> Result<Option<OpenClawDefaultModel>, AppError> {
     let config = read_openclaw_config()?;
-
-    let Some(model_value) = config
-        .get("agents")
-        .and_then(|agents| agents.get("defaults"))
-        .and_then(|defaults| defaults.get("model"))
-    else {
-        return Ok(None);
-    };
-
-    let model = serde_json::from_value(model_value.clone())
-        .map_err(|e| AppError::Config(format!("Failed to parse agents.defaults.model: {e}")))?;
-    Ok(Some(model))
+    default_model_from_config(&config)
 }
 
 pub fn set_default_model(model: &OpenClawDefaultModel) -> Result<OpenClawWriteOutcome, AppError> {
@@ -911,24 +1068,13 @@ mod tests {
     use super::*;
     use crate::config::get_app_config_dir;
     use crate::settings::{get_settings, update_settings, AppSettings};
+    use crate::test_support::{lock_test_home_and_settings, set_test_home_override};
     use serde_json::json;
     use serial_test::serial;
     use std::collections::HashMap;
     use std::fs;
     use std::path::Path;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::tempdir;
-
-    fn test_mutex() -> &'static Mutex<()> {
-        static MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
-        MUTEX.get_or_init(|| Mutex::new(()))
-    }
-
-    fn lock_test_mutex() -> MutexGuard<'static, ()> {
-        test_mutex()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
 
     struct SettingsGuard {
         previous: AppSettings,
@@ -961,6 +1107,8 @@ mod tests {
             let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
             std::env::set_var("HOME", home);
             std::env::set_var("CC_SWITCH_TEST_HOME", home);
+            set_test_home_override(Some(home));
+            crate::settings::reload_test_settings();
             Self {
                 old_home,
                 old_test_home,
@@ -978,11 +1126,13 @@ mod tests {
                 Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
                 None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
             }
+            set_test_home_override(self.old_home.as_deref().map(Path::new));
+            crate::settings::reload_test_settings();
         }
     }
 
     fn with_test_paths(source: &str, test: impl FnOnce(&Path)) {
-        let _guard = lock_test_mutex();
+        let _guard = lock_test_home_and_settings();
         let temp = tempdir().expect("create tempdir");
         let openclaw_dir = temp.path().join(".openclaw");
         fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
@@ -996,7 +1146,7 @@ mod tests {
     #[test]
     #[serial]
     fn missing_config_returns_default_models_object() {
-        let _guard = lock_test_mutex();
+        let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
         let _settings = SettingsGuard::with_openclaw_dir(dir.path());
 
@@ -1008,7 +1158,7 @@ mod tests {
     #[test]
     #[serial]
     fn read_openclaw_config_accepts_json5_syntax() {
-        let _guard = lock_test_mutex();
+        let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
         let _settings = SettingsGuard::with_openclaw_dir(dir.path());
 
@@ -1041,7 +1191,7 @@ mod tests {
     #[test]
     #[serial]
     fn read_openclaw_config_does_not_rewrite_string_contents() {
-        let _guard = lock_test_mutex();
+        let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
         let _settings = SettingsGuard::with_openclaw_dir(dir.path());
 
@@ -1073,7 +1223,7 @@ mod tests {
     #[test]
     #[serial]
     fn set_and_remove_provider_only_touch_target_entry() {
-        let _guard = lock_test_mutex();
+        let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
         let _settings = SettingsGuard::with_openclaw_dir(dir.path());
 
@@ -1104,7 +1254,7 @@ mod tests {
     #[test]
     #[serial]
     fn remove_missing_provider_is_noop_and_does_not_create_file() {
-        let _guard = lock_test_mutex();
+        let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
         let _settings = SettingsGuard::with_openclaw_dir(dir.path());
 
@@ -1122,7 +1272,7 @@ mod tests {
     #[test]
     #[serial]
     fn remove_last_provider_keeps_empty_providers_map() {
-        let _guard = lock_test_mutex();
+        let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
         let _settings = SettingsGuard::with_openclaw_dir(dir.path());
 
@@ -1150,7 +1300,7 @@ mod tests {
     #[test]
     #[serial]
     fn remove_last_provider_rewrites_models_section_like_upstream() {
-        let _guard = lock_test_mutex();
+        let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
         let _settings = SettingsGuard::with_openclaw_dir(dir.path());
 
@@ -1252,7 +1402,7 @@ mod tests {
     #[test]
     #[serial]
     fn default_model_round_trip_preserves_existing_providers() {
-        let _guard = lock_test_mutex();
+        let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
         let _settings = SettingsGuard::with_openclaw_dir(dir.path());
 
@@ -1299,7 +1449,7 @@ mod tests {
     #[test]
     #[serial]
     fn typed_provider_round_trip_preserves_known_and_unknown_fields() {
-        let _guard = lock_test_mutex();
+        let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
         let _settings = SettingsGuard::with_openclaw_dir(dir.path());
 
@@ -1352,7 +1502,7 @@ mod tests {
     #[test]
     #[serial]
     fn get_providers_reads_multiple_json5_entries() {
-        let _guard = lock_test_mutex();
+        let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
         let _settings = SettingsGuard::with_openclaw_dir(dir.path());
 
@@ -1383,7 +1533,7 @@ mod tests {
     #[test]
     #[serial]
     fn scan_openclaw_config_health_returns_parse_warning_for_invalid_json5() {
-        let _guard = lock_test_mutex();
+        let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
         let _home = HomeGuard::set(dir.path());
         let _settings = SettingsGuard::with_openclaw_dir(&dir.path().join(".openclaw"));
@@ -1471,7 +1621,7 @@ mod tests {
     #[test]
     #[serial]
     fn backup_cleanup_uses_settings_retain_count() {
-        let _guard = lock_test_mutex();
+        let _guard = lock_test_home_and_settings();
         let dir = tempdir().expect("create tempdir");
         let openclaw_dir = dir.path().join(".openclaw");
         fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");

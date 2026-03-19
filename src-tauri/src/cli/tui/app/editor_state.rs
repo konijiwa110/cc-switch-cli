@@ -14,7 +14,7 @@ pub enum EditorSubmit {
     ProviderFormApplyCodexAuth,
     ProviderFormApplyCodexConfigToml,
     ProviderAdd,
-    ProviderEdit { id: String },
+    ProviderEdit { id: String, sync_to_live: bool },
     McpAdd,
     McpEdit { id: String },
     ConfigCommonSnippet { app_type: AppType },

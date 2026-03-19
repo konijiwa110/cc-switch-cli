@@ -2,7 +2,7 @@ use super::*;
 
 impl App {
     pub(crate) fn on_providers_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
-        let visible = visible_providers(&self.filter, data);
+        let visible = visible_providers(&self.app_type, &self.filter, data);
         match key.code {
             KeyCode::Up => {
                 self.provider_idx = self.provider_idx.saturating_sub(1);
@@ -95,7 +95,7 @@ impl App {
                 self.overlay = Overlay::Confirm(ConfirmOverlay {
                     title: texts::tui_confirm_delete_provider_title().to_string(),
                     message: texts::tui_confirm_delete_provider_message(
-                        &row.provider.name,
+                        &super::data::provider_display_name(&self.app_type, row),
                         &row.id,
                     ),
                     action: ConfirmAction::ProviderDelete { id: row.id.clone() },
@@ -122,7 +122,7 @@ impl App {
                 };
                 self.overlay = Overlay::StreamCheckRunning {
                     provider_id: row.id.clone(),
-                    provider_name: row.provider.name.clone(),
+                    provider_name: super::data::provider_display_name(&self.app_type, row),
                 };
                 Action::ProviderStreamCheck { id: row.id.clone() }
             }
@@ -204,7 +204,7 @@ impl App {
                 }
                 self.overlay = Overlay::StreamCheckRunning {
                     provider_id: row.id.clone(),
-                    provider_name: row.provider.name.clone(),
+                    provider_name: super::data::provider_display_name(&self.app_type, row),
                 };
                 Action::ProviderStreamCheck { id: row.id.clone() }
             }

@@ -165,6 +165,15 @@ impl UiData {
     }
 }
 
+pub(crate) fn provider_display_name(app_type: &AppType, row: &ProviderRow) -> String {
+    if matches!(app_type, AppType::OpenClaw) && row.is_in_config {
+        return openclaw_provider_display_name(&row.id, &row.provider.settings_config)
+            .unwrap_or_else(|| row.provider.name.clone());
+    }
+
+    row.provider.name.clone()
+}
+
 fn load_providers(state: &AppState, app_type: &AppType) -> Result<ProvidersSnapshot, AppError> {
     let current_id = ProviderService::current(state, app_type.clone())?;
     let providers = ProviderService::list(state, app_type.clone())?;
@@ -324,7 +333,7 @@ fn extract_primary_model_id(
 }
 
 fn openclaw_provider_for_row(
-    id: &str,
+    _id: &str,
     provider: Provider,
     openclaw_live_provider: Option<&Value>,
 ) -> Provider {
@@ -334,9 +343,6 @@ fn openclaw_provider_for_row(
 
     let mut provider = provider;
     provider.settings_config = live_provider.clone();
-    if let Some(name) = openclaw_provider_display_name(id, live_provider) {
-        provider.name = name;
-    }
     provider
 }
 
@@ -620,21 +626,10 @@ mod tests {
     use serde_json::json;
     use serial_test::serial;
     use std::path::Path;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::tempdir;
 
     use crate::settings::{get_settings, update_settings, AppSettings};
-
-    fn test_mutex() -> &'static Mutex<()> {
-        static MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
-        MUTEX.get_or_init(|| Mutex::new(()))
-    }
-
-    fn lock_test_mutex() -> MutexGuard<'static, ()> {
-        test_mutex()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
+    use crate::test_support::{lock_test_home_and_settings, set_test_home_override};
 
     struct HomeGuard {
         old_home: Option<std::ffi::OsString>,
@@ -647,6 +642,8 @@ mod tests {
             let old_userprofile = std::env::var_os("USERPROFILE");
             std::env::set_var("HOME", home);
             std::env::set_var("USERPROFILE", home);
+            set_test_home_override(Some(home));
+            crate::settings::reload_test_settings();
             Self {
                 old_home,
                 old_userprofile,
@@ -664,6 +661,8 @@ mod tests {
                 Some(value) => std::env::set_var("USERPROFILE", value),
                 None => std::env::remove_var("USERPROFILE"),
             }
+            set_test_home_override(self.old_home.as_deref().map(Path::new));
+            crate::settings::reload_test_settings();
         }
     }
 
@@ -840,7 +839,7 @@ mod tests {
     #[test]
     #[serial]
     fn openclaw_config_snapshot_includes_slice_and_warning_data() {
-        let _guard = lock_test_mutex();
+        let _guard = lock_test_home_and_settings();
         let temp = tempdir().expect("tempdir");
         let _home = HomeGuard::set(temp.path());
 
@@ -909,7 +908,7 @@ mod tests {
     #[test]
     #[serial]
     fn non_openclaw_config_snapshot_leaves_openclaw_fields_unset() {
-        let _guard = lock_test_mutex();
+        let _guard = lock_test_home_and_settings();
         let temp = tempdir().expect("tempdir");
         let _home = HomeGuard::set(temp.path());
 
@@ -996,7 +995,7 @@ mod tests {
     #[test]
     #[serial]
     fn load_providers_openclaw_shows_live_only_provider_without_importing_snapshot() {
-        let _guard = lock_test_mutex();
+        let _guard = lock_test_home_and_settings();
         let temp = tempdir().expect("create tempdir");
         let openclaw_dir = temp.path().join(".openclaw");
         std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
@@ -1029,6 +1028,10 @@ mod tests {
             .find(|row| row.id == "live-only")
             .expect("live-only provider should appear in TUI rows");
         assert!(row.is_in_config);
+        assert_eq!(
+            provider_display_name(&AppType::OpenClaw, row),
+            "Live Only Model"
+        );
         assert_eq!(row.provider.name, "Live Only Model");
         assert_eq!(row.primary_model_id.as_deref(), Some("openclaw-live-model"));
 
@@ -1043,7 +1046,7 @@ mod tests {
     #[test]
     #[serial]
     fn load_providers_openclaw_prefers_live_values_for_existing_snapshot_provider() {
-        let _guard = lock_test_mutex();
+        let _guard = lock_test_home_and_settings();
         let temp = tempdir().expect("create tempdir");
         let openclaw_dir = temp.path().join(".openclaw");
         std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
@@ -1091,12 +1094,75 @@ mod tests {
             .find(|row| row.id == "shared-id")
             .expect("existing snapshot provider should still be listed");
 
-        assert_eq!(row.provider.name, "Live Model Name");
+        assert_eq!(
+            provider_display_name(&AppType::OpenClaw, row),
+            "Live Model Name"
+        );
+        assert_eq!(row.provider.name, "Saved Snapshot Name");
         assert_eq!(row.api_url.as_deref(), Some("https://live.example.com/v1"));
         assert_eq!(row.primary_model_id.as_deref(), Some("live-model"));
         assert_eq!(
             row.provider.settings_config["baseUrl"].as_str(),
             Some("https://live.example.com/v1")
+        );
+    }
+
+    #[test]
+    fn provider_display_name_openclaw_prefers_primary_model_name_without_mutating_saved_name() {
+        let row = ProviderRow {
+            id: "shared-id".to_string(),
+            provider: Provider::with_id(
+                "shared-id".to_string(),
+                "Saved Snapshot Name".to_string(),
+                json!({
+                    "models": [
+                        {"id": "live-model", "name": "Live Model Name"}
+                    ]
+                }),
+                None,
+            ),
+            api_url: Some("https://live.example.com/v1".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("live-model".to_string()),
+            default_model_id: None,
+        };
+
+        assert_eq!(
+            provider_display_name(&AppType::OpenClaw, &row),
+            "Live Model Name"
+        );
+        assert_eq!(row.provider.name, "Saved Snapshot Name");
+    }
+
+    #[test]
+    fn provider_display_name_keeps_saved_name_for_non_openclaw_rows() {
+        let row = ProviderRow {
+            id: "shared-id".to_string(),
+            provider: Provider::with_id(
+                "shared-id".to_string(),
+                "Saved Snapshot Name".to_string(),
+                json!({
+                    "models": [
+                        {"id": "other-model", "name": "Should Not Leak"}
+                    ]
+                }),
+                None,
+            ),
+            api_url: Some("https://example.com/v1".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: None,
+            default_model_id: None,
+        };
+
+        assert_eq!(
+            provider_display_name(&AppType::Claude, &row),
+            "Saved Snapshot Name"
         );
     }
 }

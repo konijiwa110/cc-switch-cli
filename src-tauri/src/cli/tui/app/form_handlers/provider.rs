@@ -84,7 +84,10 @@ impl App {
         Action::EditorSubmit {
             submit: match &provider.mode {
                 FormMode::Add => EditorSubmit::ProviderAdd,
-                FormMode::Edit { id } => EditorSubmit::ProviderEdit { id: id.clone() },
+                FormMode::Edit { id } => EditorSubmit::ProviderEdit {
+                    id: id.clone(),
+                    sync_to_live: provider.sync_edit_to_live,
+                },
             },
             content,
         }

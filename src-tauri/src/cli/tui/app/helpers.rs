@@ -29,6 +29,7 @@ pub(crate) fn route_default_focus(route: &Route) -> Focus {
 }
 
 pub(crate) fn visible_providers<'a>(
+    app_type: &AppType,
     filter: &FilterState,
     data: &'a UiData,
 ) -> Vec<&'a super::data::ProviderRow> {
@@ -39,7 +40,11 @@ pub(crate) fn visible_providers<'a>(
         .filter(|row| match &query {
             None => true,
             Some(q) => {
-                row.provider.name.to_lowercase().contains(q) || row.id.to_lowercase().contains(q)
+                super::data::provider_display_name(app_type, row)
+                    .to_lowercase()
+                    .contains(q)
+                    || row.provider.name.to_lowercase().contains(q)
+                    || row.id.to_lowercase().contains(q)
             }
         })
         .collect()

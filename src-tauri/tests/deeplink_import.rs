@@ -127,6 +127,101 @@ fn deeplink_import_codex_provider_builds_auth_and_config() {
 }
 
 #[test]
+fn deeplink_import_openclaw_provider_defaults_to_openai_completions_api() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let url = "ccswitch://v1/import?resource=provider&app=openclaw&name=DeepLink%20OpenClaw&homepage=https%3A%2F%2Fopenclaw.example&endpoint=https%3A%2F%2Fapi.openclaw.example%2Fv1&apiKey=sk-test-openclaw-key&model=gpt-4.1";
+    let request = parse_deeplink_url(url).expect("parse deeplink url");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::OpenClaw);
+
+    let state = state_from_config(config);
+
+    let provider_id = import_provider_from_deeplink(&state, request.clone())
+        .expect("import provider from deeplink");
+
+    let guard = state.config.read().expect("read config");
+    let manager = guard
+        .get_manager(&AppType::OpenClaw)
+        .expect("openclaw manager should exist");
+    let provider = manager
+        .providers
+        .get(&provider_id)
+        .expect("provider created via deeplink");
+    assert_eq!(provider.name, request.name.clone().expect("request name"));
+    assert_eq!(provider.website_url.as_deref(), request.homepage.as_deref());
+    assert_eq!(
+        provider.settings_config["api"].as_str(),
+        Some("openai-completions")
+    );
+    assert_eq!(
+        provider.settings_config["apiKey"].as_str(),
+        request.api_key.as_deref()
+    );
+    assert_eq!(
+        provider.settings_config["baseUrl"].as_str(),
+        request.endpoint.as_deref()
+    );
+    assert_eq!(
+        provider.settings_config["models"][0]["id"].as_str(),
+        request.model.as_deref()
+    );
+    drop(guard);
+
+    let persisted = state
+        .db
+        .get_provider_by_id(&provider_id, AppType::OpenClaw.as_str())
+        .expect("read provider from db");
+    assert!(persisted.is_some(), "provider should be persisted to db");
+}
+
+#[test]
+fn deeplink_import_openclaw_provider_merges_additive_config_without_extra_api_or_model_inference() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let config_json = r#"{"apiKey":"sk-config-openclaw","baseUrl":"https://config.openclaw.example/v1","api":"openai","models":[{"id":"config-model","name":"Config Model"}]}"#;
+    let config_b64 = BASE64_URL_SAFE_NO_PAD.encode(config_json.as_bytes());
+
+    let url = format!(
+        "ccswitch://v1/import?resource=provider&app=openclaw&name=Config%20OpenClaw&config={config_b64}&configFormat=json"
+    );
+    let request = parse_deeplink_url(&url).expect("parse deeplink url");
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::OpenClaw);
+
+    let state = state_from_config(config);
+
+    let provider_id =
+        import_provider_from_deeplink(&state, request).expect("import provider from deeplink");
+
+    let guard = state.config.read().expect("read config");
+    let manager = guard
+        .get_manager(&AppType::OpenClaw)
+        .expect("openclaw manager should exist");
+    let provider = manager
+        .providers
+        .get(&provider_id)
+        .expect("provider created via deeplink");
+
+    assert_eq!(provider.settings_config["apiKey"], "sk-config-openclaw");
+    assert_eq!(
+        provider.settings_config["baseUrl"],
+        "https://config.openclaw.example/v1"
+    );
+    assert_eq!(provider.settings_config["api"], "openai-completions");
+    assert!(
+        provider.settings_config.get("models").is_none(),
+        "OpenClaw deep links should not infer models from additive config payloads"
+    );
+}
+
+#[test]
 fn deeplink_import_rejects_non_http_endpoints_from_config() {
     let _guard = lock_test_mutex();
     reset_test_fs();

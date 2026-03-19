@@ -610,10 +610,15 @@ impl App {
         self.overlay = Overlay::None;
         self.focus = Focus::Content;
         self.editor = None;
-        self.form = Some(FormState::ProviderAdd(ProviderAddFormState::from_provider(
-            self.app_type.clone(),
-            &row.provider,
-        )));
+        let sync_edit_to_live =
+            !matches!(self.app_type, crate::app_config::AppType::OpenClaw) || row.is_in_config;
+        self.form = Some(FormState::ProviderAdd(
+            ProviderAddFormState::from_provider_with_live_sync(
+                self.app_type.clone(),
+                &row.provider,
+                sync_edit_to_live,
+            ),
+        ));
     }
 
     pub(crate) fn open_mcp_add_form(&mut self) {

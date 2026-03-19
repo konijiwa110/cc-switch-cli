@@ -2036,6 +2036,44 @@ mod tests {
     }
 
     #[test]
+    fn openclaw_provider_edit_form_uses_saved_name_not_live_display_name() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "shared-id".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "shared-id".to_string(),
+                "Saved Snapshot Name".to_string(),
+                json!({
+                    "api": "openai-completions",
+                    "models": [
+                        {"id": "live-model", "name": "Live Model Name"}
+                    ]
+                }),
+                None,
+            ),
+            api_url: Some("https://live.example.com/v1".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("live-model".to_string()),
+            default_model_id: None,
+        });
+
+        let action = app.on_key(key(KeyCode::Char('e')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.form.as_ref(),
+            Some(super::super::form::FormState::ProviderAdd(form))
+                if form.name.value == "Saved Snapshot Name"
+        ));
+    }
+
+    #[test]
     fn openclaw_config_route_env_enter_opens_env_editor() {
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::ConfigOpenClawEnv;
@@ -3720,5 +3758,46 @@ mod tests {
             other => panic!("expected ProviderAdd form, got: {other:?}"),
         };
         assert_eq!(format, super::super::form::ClaudeApiFormat::OpenAiChat);
+    }
+
+    #[test]
+    fn openclaw_saved_only_provider_edit_submit_marks_live_sync_as_disabled() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "saved-only".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "saved-only".to_string(),
+                "Saved Only".to_string(),
+                json!({"apiKey":"sk-demo","baseUrl":"https://example.com"}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: false,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("saved-model".to_string()),
+            default_model_id: None,
+        });
+
+        let action = app.on_key(key(KeyCode::Char('e')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(app.form.is_some());
+
+        let submit = app.on_key(ctrl(KeyCode::Char('s')), &data);
+        assert!(matches!(
+            submit,
+            Action::EditorSubmit {
+                submit: EditorSubmit::ProviderEdit {
+                    id,
+                    sync_to_live: false,
+                },
+                content,
+            } if id == "saved-only" && content.contains("Saved Only")
+        ));
     }
 }

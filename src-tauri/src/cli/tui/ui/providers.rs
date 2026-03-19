@@ -1,3 +1,5 @@
+use crate::cli::tui::data;
+
 use super::*;
 
 fn openclaw_status_label(row: &ProviderRow) -> &'static str {
@@ -22,7 +24,11 @@ pub(super) fn provider_rows_filtered<'a>(app: &App, data: &'a UiData) -> Vec<&'a
         .filter(|row| match &query {
             None => true,
             Some(q) => {
-                row.provider.name.to_lowercase().contains(q) || row.id.to_lowercase().contains(q)
+                data::provider_display_name(&app.app_type, row)
+                    .to_lowercase()
+                    .contains(q)
+                    || row.provider.name.to_lowercase().contains(q)
+                    || row.id.to_lowercase().contains(q)
             }
         })
         .collect()
@@ -109,7 +115,7 @@ pub(super) fn render_providers(
         let api = row.api_url.as_deref().unwrap_or(texts::tui_na());
         Row::new(vec![
             Cell::from(marker),
-            Cell::from(row.provider.name.clone()),
+            Cell::from(data::provider_display_name(&app.app_type, row)),
             Cell::from(api),
         ])
     });
@@ -203,7 +209,7 @@ pub(super) fn render_provider_detail(
         Line::from(vec![
             Span::styled(texts::header_name(), Style::default().fg(theme.accent)),
             Span::raw(": "),
-            Span::raw(row.provider.name.clone()),
+            Span::raw(data::provider_display_name(&app.app_type, row)),
         ]),
         Line::raw(""),
     ];

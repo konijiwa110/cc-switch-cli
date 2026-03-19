@@ -1,3 +1,5 @@
+use crate::cli::tui::data;
+
 use super::*;
 
 pub(super) fn render_header(
@@ -90,8 +92,8 @@ pub(super) fn render_header(
         .rows
         .iter()
         .find(|p| p.is_current)
-        .map(|p| p.provider.name.as_str())
-        .unwrap_or(texts::none());
+        .map(|row| data::provider_display_name(&app.app_type, row))
+        .unwrap_or_else(|| texts::none().to_string());
 
     let current_app_routed = data
         .proxy

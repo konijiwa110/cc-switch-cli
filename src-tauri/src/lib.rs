@@ -25,6 +25,9 @@ mod store;
 mod sync_policy;
 mod usage_script;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 // CLI module
 pub mod cli;
 

@@ -138,7 +138,11 @@ fn render_content(
         Route::Prompts => render_prompts(frame, app, data, content_area, theme),
         Route::Config => render_config(frame, app, data, content_area, theme),
         Route::ConfigOpenClawEnv | Route::ConfigOpenClawTools | Route::ConfigOpenClawAgents => {
-            render_config_openclaw_route(frame, app, data, content_area, theme)
+            if matches!(app.app_type, AppType::OpenClaw) {
+                render_config_openclaw_route(frame, app, data, content_area, theme)
+            } else {
+                render_config(frame, app, data, content_area, theme)
+            }
         }
         Route::ConfigWebDav => render_config_webdav(frame, app, data, content_area, theme),
         Route::Skills => render_skills_installed(frame, app, data, content_area, theme),

@@ -37,6 +37,14 @@ mod claude_mcp {
     }
 }
 
+mod config {
+    use std::path::PathBuf;
+
+    pub(crate) fn home_dir() -> Option<PathBuf> {
+        dirs::home_dir()
+    }
+}
+
 mod database {
     use super::error::AppError;
     use indexmap::IndexMap;

@@ -32,6 +32,12 @@ mod error {
         },
         #[error("锁获取失败: {0}")]
         Lock(String),
+        #[error("{zh} ({en})")]
+        Localized {
+            key: &'static str,
+            zh: String,
+            en: String,
+        },
     }
 
     impl AppError {
@@ -39,6 +45,14 @@ mod error {
             Self::Io {
                 path: path.as_ref().display().to_string(),
                 source,
+            }
+        }
+
+        pub fn localized(key: &'static str, zh: impl Into<String>, en: impl Into<String>) -> Self {
+            Self::Localized {
+                key,
+                zh: zh.into(),
+                en: en.into(),
             }
         }
     }
@@ -57,8 +71,12 @@ mod config {
 
     use crate::error::AppError;
 
+    pub fn home_dir() -> Option<PathBuf> {
+        crate::test_support::test_home_override().or_else(dirs::home_dir)
+    }
+
     pub fn get_app_config_dir() -> PathBuf {
-        dirs::home_dir()
+        home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".cc-switch")
     }
@@ -142,12 +160,14 @@ mod provider {
 }
 
 mod settings {
+    use serde::{Deserialize, Serialize};
     use std::path::PathBuf;
     use std::sync::{OnceLock, RwLock};
 
     use crate::error::AppError;
 
-    #[derive(Debug, Clone, Default)]
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
     pub struct AppSettings {
         pub openclaw_config_dir: Option<String>,
         pub backup_retain_count: Option<u32>,
@@ -168,6 +188,11 @@ mod settings {
         Ok(())
     }
 
+    pub(crate) fn reload_test_settings() {
+        // The integration-test shim keeps settings in memory only so fixture cleanup
+        // cannot accidentally write back to the developer's real HOME.
+    }
+
     pub fn get_openclaw_override_dir() -> Option<PathBuf> {
         get_settings().openclaw_config_dir.map(PathBuf::from)
     }
@@ -177,6 +202,39 @@ mod settings {
             .backup_retain_count
             .map(|count| usize::try_from(count).unwrap_or(usize::MAX).max(1))
             .unwrap_or(10)
+    }
+}
+
+mod test_support {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, MutexGuard, OnceLock, RwLock};
+
+    pub(crate) type TestHomeSettingsLock = MutexGuard<'static, ()>;
+
+    pub(crate) fn lock_test_home_and_settings() -> TestHomeSettingsLock {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn test_home_store() -> &'static RwLock<Option<PathBuf>> {
+        static STORE: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
+        STORE.get_or_init(|| RwLock::new(None))
+    }
+
+    pub(crate) fn set_test_home_override(path: Option<&Path>) {
+        let mut guard = test_home_store()
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = path.map(Path::to_path_buf);
+    }
+
+    pub(crate) fn test_home_override() -> Option<PathBuf> {
+        test_home_store()
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
@@ -468,6 +526,327 @@ fn provider_point_updates_preserve_models_mode_and_other_provider_keys() {
             json!("sk-added")
         );
         assert!(config["models"]["providers"].get("remove").is_none());
+    });
+}
+
+#[test]
+#[serial]
+fn set_provider_rejects_default_model_refs_that_would_become_dangling_without_rewriting_agents_section(
+) {
+    let source = r#"{
+  // preserve root comment
+  models: {
+    mode: 'merge',
+    providers: {
+      keep: {
+        baseUrl: 'https://keep.example/v1',
+        apiKey: 'sk-keep',
+        models: [
+          { id: 'primary-model' },
+          { id: 'fallback-model' },
+        ],
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      model: {
+        primary: 'keep/fallback-model',
+        fallbacks: ['keep/primary-model'],
+      },
+    },
+  },
+}
+"#;
+
+    with_fixture(source, |config_path| {
+        let err = set_provider(
+            "keep",
+            json!({
+                "baseUrl": "https://keep.example/v2",
+                "apiKey": "sk-keep",
+                "models": [{ "id": "primary-model" }]
+            }),
+        )
+        .expect_err("provider write should reject edits that orphan default model refs");
+
+        match err {
+            crate::error::AppError::Localized { key, .. } => {
+                assert_eq!(key, "openclaw.default_model.provider_model_missing");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let written = fs::read_to_string(config_path).expect("read config after edit");
+        assert_eq!(
+            written, source,
+            "rejecting the write should leave openclaw.json text untouched"
+        );
+        let parsed: serde_json::Value = json5::from_str(&written).expect("parse rewritten config");
+        assert_eq!(
+            parsed["models"]["providers"]["keep"]["baseUrl"],
+            json!("https://keep.example/v1")
+        );
+        assert_eq!(
+            parsed["models"]["providers"]["keep"]["models"],
+            json!([{ "id": "primary-model" }, { "id": "fallback-model" }])
+        );
+        assert_eq!(
+            parsed["agents"]["defaults"]["model"]["primary"],
+            json!("keep/fallback-model")
+        );
+    });
+}
+
+#[test]
+#[serial]
+fn remove_provider_rejects_default_model_refs_that_would_become_dangling_without_rewriting_agents_section(
+) {
+    let source = r#"{
+  // preserve root comment
+  models: {
+    mode: 'merge',
+    providers: {
+      keep: {
+        baseUrl: 'https://keep.example/v1',
+        apiKey: 'sk-keep',
+        models: [
+          { id: 'primary-model' },
+          { id: 'fallback-model' },
+        ],
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      model: {
+        primary: 'keep/fallback-model',
+        fallbacks: ['keep/primary-model'],
+      },
+    },
+  },
+}
+"#;
+
+    with_fixture(source, |config_path| {
+        let err = remove_provider("keep")
+            .expect_err("provider removal should reject dangling default model refs");
+
+        match err {
+            crate::error::AppError::Localized { key, .. } => {
+                assert_eq!(key, "openclaw.default_model.provider_missing");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let written = fs::read_to_string(config_path).expect("read config after remove");
+        assert_eq!(
+            written, source,
+            "rejecting the removal should leave openclaw.json text untouched"
+        );
+        let parsed: serde_json::Value = json5::from_str(&written).expect("parse rewritten config");
+        assert!(parsed["models"]["providers"].get("keep").is_some());
+        assert_eq!(
+            parsed["agents"]["defaults"]["model"]["primary"],
+            json!("keep/fallback-model")
+        );
+    });
+}
+
+#[test]
+#[serial]
+fn set_provider_rejects_agents_defaults_models_refs_that_would_become_dangling_and_keeps_text_unchanged(
+) {
+    let source = r#"{
+  // preserve root comment
+  models: {
+    mode: 'merge',
+    providers: {
+      keep: {
+        baseUrl: 'https://keep.example/v1',
+        apiKey: 'sk-keep',
+        models: [
+          { id: 'primary-model' },
+          { id: 'fallback-model' },
+        ],
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      models: {
+        'keep/fallback-model': {
+          alias: 'Fallback',
+        },
+      },
+    },
+  },
+}
+"#;
+
+    with_fixture(source, |config_path| {
+        let err = set_provider(
+            "keep",
+            json!({
+                "baseUrl": "https://keep.example/v2",
+                "apiKey": "sk-keep",
+                "models": [{ "id": "primary-model" }]
+            }),
+        )
+        .expect_err("provider write should reject edits that orphan agents.defaults.models refs");
+
+        match err {
+            crate::error::AppError::Localized { key, .. } => {
+                assert_eq!(key, "openclaw.default_model.provider_model_missing");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let written = fs::read_to_string(config_path).expect("read config after rejected edit");
+        assert_eq!(
+            written, source,
+            "rejecting the model-catalog-dangling write should leave openclaw.json text untouched"
+        );
+    });
+}
+
+#[test]
+#[serial]
+fn remove_provider_rejects_agents_defaults_models_refs_that_would_become_dangling_and_keeps_text_unchanged(
+) {
+    let source = r#"{
+  // preserve root comment
+  models: {
+    mode: 'merge',
+    providers: {
+      keep: {
+        baseUrl: 'https://keep.example/v1',
+        apiKey: 'sk-keep',
+        models: [
+          { id: 'primary-model' },
+          { id: 'fallback-model' },
+        ],
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      models: {
+        'keep/fallback-model': {
+          alias: 'Fallback',
+        },
+      },
+    },
+  },
+}
+"#;
+
+    with_fixture(source, |config_path| {
+        let err = remove_provider("keep")
+            .expect_err("provider removal should reject dangling agents.defaults.models refs");
+
+        match err {
+            crate::error::AppError::Localized { key, .. } => {
+                assert_eq!(key, "openclaw.default_model.provider_missing");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let written = fs::read_to_string(config_path).expect("read config after rejected remove");
+        assert_eq!(
+            written, source,
+            "rejecting the model-catalog-dangling removal should leave openclaw.json text untouched"
+        );
+    });
+}
+
+#[test]
+#[serial]
+fn set_provider_rejects_invalid_default_model_reference_format_without_changing_text() {
+    let source = r#"{
+  models: {
+    mode: 'merge',
+    providers: {
+      keep: {
+        baseUrl: 'https://keep.example/v1',
+        models: [{ id: 'primary-model' }],
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      model: {
+        primary: 'keep/primary-model/extra',
+        fallbacks: ['keep/', '/primary-model'],
+      },
+    },
+  },
+}
+"#;
+
+    with_fixture(source, |config_path| {
+        let err = set_provider(
+            "keep",
+            json!({
+                "baseUrl": "https://keep.example/v2",
+                "models": [{ "id": "primary-model" }]
+            }),
+        )
+        .expect_err("invalid default model ref format should be rejected before membership checks");
+
+        match err {
+            crate::error::AppError::Localized { key, .. } => {
+                assert_eq!(key, "openclaw.default_model.invalid_reference");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let written = fs::read_to_string(config_path)
+            .expect("read config after rejected invalid-format write");
+        assert_eq!(written, source);
+    });
+}
+
+#[test]
+#[serial]
+fn remove_provider_rejects_invalid_model_catalog_reference_format_without_changing_text() {
+    let source = r#"{
+  models: {
+    mode: 'merge',
+    providers: {
+      keep: {
+        baseUrl: 'https://keep.example/v1',
+        models: [{ id: 'primary-model' }],
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      models: {
+        'keep/primary-model/extra': {
+          alias: 'Broken',
+        },
+      },
+    },
+  },
+}
+"#;
+
+    with_fixture(source, |config_path| {
+        let err = remove_provider("keep").expect_err(
+            "invalid model catalog ref format should be rejected before membership checks",
+        );
+
+        match err {
+            crate::error::AppError::Localized { key, .. } => {
+                assert_eq!(key, "openclaw.default_model.invalid_reference");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let written = fs::read_to_string(config_path)
+            .expect("read config after rejected invalid-format remove");
+        assert_eq!(written, source);
     });
 }
 

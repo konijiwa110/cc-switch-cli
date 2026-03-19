@@ -1,7 +1,7 @@
 //! Deep link import functionality for CC Switch (CLI edition).
 //!
 //! Implements the `ccswitch://v1/import?...` protocol for importing resources.
-//! Currently supports importing provider configurations for Claude/Codex/Gemini.
+//! Currently supports importing provider configurations for Claude/Codex/Gemini/OpenCode/OpenClaw.
 
 mod parser;
 mod provider;

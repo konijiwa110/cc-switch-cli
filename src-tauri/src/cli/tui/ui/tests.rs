@@ -2800,6 +2800,64 @@ fn openclaw_provider_detail_shows_actual_default_model_id() {
 }
 
 #[test]
+fn openclaw_provider_list_prefers_live_display_name_over_saved_snapshot_name() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows[0].provider = Provider::with_id(
+        "p1".to_string(),
+        "Saved Snapshot Name".to_string(),
+        json!({
+            "api": "openai-completions",
+            "models": [
+                {"id": "live-model", "name": "Live Model Name"}
+            ]
+        }),
+        None,
+    );
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(all.contains("Live Model Name"), "{all}");
+    assert!(!all.contains("Saved Snapshot Name"), "{all}");
+}
+
+#[test]
+fn openclaw_provider_detail_prefers_live_display_name_over_saved_snapshot_name() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ProviderDetail {
+        id: "p1".to_string(),
+    };
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows[0].provider = Provider::with_id(
+        "p1".to_string(),
+        "Saved Snapshot Name".to_string(),
+        json!({
+            "api": "openai-completions",
+            "models": [
+                {"id": "live-model", "name": "Live Model Name"}
+            ]
+        }),
+        None,
+    );
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(all.contains("Live Model Name"), "{all}");
+    assert!(!all.contains("Saved Snapshot Name"), "{all}");
+}
+
+#[test]
 fn openclaw_provider_detail_localizes_status_copy_in_chinese() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::Chinese);

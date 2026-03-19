@@ -870,27 +870,34 @@ mod tests {
     use serde_json::json;
     use serial_test::serial;
     use std::env;
+    use std::ffi::OsString;
     use std::fs;
+    use std::path::Path;
     use tempfile::TempDir;
 
     struct TempHome {
         #[allow(dead_code)] // 字段通过 Drop trait 管理临时目录生命周期
         dir: TempDir,
-        original_home: Option<String>,
-        original_userprofile: Option<String>,
+        _lock: crate::test_support::TestHomeSettingsLock,
+        original_home: Option<OsString>,
+        original_userprofile: Option<OsString>,
     }
 
     impl TempHome {
         fn new() -> Self {
             let dir = TempDir::new().expect("failed to create temp home");
-            let original_home = env::var("HOME").ok();
-            let original_userprofile = env::var("USERPROFILE").ok();
+            let lock = crate::test_support::lock_test_home_and_settings();
+            let original_home = env::var_os("HOME");
+            let original_userprofile = env::var_os("USERPROFILE");
 
             env::set_var("HOME", dir.path());
             env::set_var("USERPROFILE", dir.path());
+            crate::test_support::set_test_home_override(Some(dir.path()));
+            crate::settings::reload_test_settings();
 
             Self {
                 dir,
+                _lock: lock,
                 original_home,
                 original_userprofile,
             }
@@ -908,6 +915,11 @@ mod tests {
                 Some(value) => env::set_var("USERPROFILE", value),
                 None => env::remove_var("USERPROFILE"),
             }
+
+            crate::test_support::set_test_home_override(
+                self.original_home.as_deref().map(Path::new),
+            );
+            crate::settings::reload_test_settings();
         }
     }
 
@@ -917,6 +929,38 @@ mod tests {
             fs::create_dir_all(parent).expect("create parent dir");
         }
         fs::write(path, content).expect("write prompt");
+    }
+
+    fn seed_stale_test_home_with_gemini_override(home: &std::path::Path) {
+        let stale_gemini_dir = home.join("custom-gemini");
+        let _lock = crate::test_support::lock_test_home_and_settings();
+
+        crate::test_support::set_test_home_override(Some(home));
+        crate::settings::reload_test_settings();
+
+        let mut settings = crate::settings::AppSettings::default();
+        settings.gemini_config_dir = Some(stale_gemini_dir.to_string_lossy().into_owned());
+        settings.save().expect("save stale settings");
+        crate::settings::reload_test_settings();
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn temp_home_refreshes_test_home_override_and_settings_cache() {
+        let stale_home = TempDir::new().expect("failed to create stale home");
+        seed_stale_test_home_with_gemini_override(stale_home.path());
+
+        let home = TempHome::new();
+
+        assert_eq!(
+            crate::config::home_dir(),
+            Some(home.dir.path().to_path_buf())
+        );
+        assert_eq!(crate::settings::get_gemini_override_dir(), None);
+        assert_eq!(
+            crate::prompt_files::prompt_file_path(&AppType::Gemini).expect("gemini prompt path"),
+            home.dir.path().join(".gemini").join("GEMINI.md")
+        );
     }
 
     #[test]

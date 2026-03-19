@@ -1186,6 +1186,586 @@ fn provider_service_switch_openclaw_syncs_only_target_entry() {
 }
 
 #[test]
+fn provider_service_sync_current_to_live_openclaw_skips_saved_only_snapshot_providers() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::OpenClaw)
+            .expect("openclaw manager");
+        manager.providers.insert(
+            "keep".to_string(),
+            Provider::with_id(
+                "keep".to_string(),
+                "Keep Updated".to_string(),
+                json!({
+                    "apiKey": "sk-keep-new",
+                    "baseUrl": "https://keep.new.example/v1",
+                    "models": [{ "id": "keep-model-old" }]
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "saved-only".to_string(),
+            Provider::with_id(
+                "saved-only".to_string(),
+                "Saved Only".to_string(),
+                json!({
+                    "apiKey": "sk-saved-only",
+                    "baseUrl": "https://saved.only.example/v1",
+                    "models": [{ "id": "saved-only-model" }]
+                }),
+                None,
+            ),
+        );
+    }
+
+    let openclaw_dir = home.join(".openclaw");
+    std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+    let openclaw_path = openclaw_dir.join("openclaw.json");
+    std::fs::write(
+        &openclaw_path,
+        serde_json::to_string_pretty(&json!({
+            "models": {
+                "mode": "merge",
+                "providers": {
+                    "keep": {
+                        "apiKey": "sk-keep-old",
+                        "baseUrl": "https://keep.old.example/v1",
+                        "models": [{ "id": "keep-model-old" }]
+                    }
+                }
+            },
+            "agents": {
+                "defaults": {
+                    "model": {
+                        "primary": "keep/keep-model-old"
+                    }
+                }
+            }
+        }))
+        .expect("serialize openclaw live config"),
+    )
+    .expect("seed openclaw live config");
+
+    let state = state_from_config(config);
+
+    ProviderService::sync_current_to_live(&state)
+        .expect("sync_current_to_live should tolerate additive-mode snapshots");
+
+    let live_after = read_openclaw_live_config_json5(&openclaw_path);
+    let providers = live_after["models"]["providers"]
+        .as_object()
+        .expect("openclaw live config should contain providers map");
+    assert_eq!(
+        providers
+            .get("keep")
+            .and_then(|provider| provider.get("baseUrl"))
+            .and_then(|value| value.as_str()),
+        Some("https://keep.new.example/v1"),
+        "sync_current_to_live should still refresh providers that already exist in live openclaw.json"
+    );
+    assert!(
+        providers.get("saved-only").is_none(),
+        "sync_current_to_live should not write saved-only snapshot providers back into live openclaw.json"
+    );
+    assert_eq!(
+        live_after["agents"]["defaults"]["model"]["primary"],
+        json!("keep/keep-model-old"),
+        "sync_current_to_live should leave unrelated OpenClaw sections untouched"
+    );
+}
+
+#[test]
+fn provider_service_update_saved_only_openclaw_updates_snapshot_without_touching_live_config() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::OpenClaw)
+            .expect("openclaw manager");
+        manager.providers.insert(
+            "saved-only".to_string(),
+            Provider::with_id(
+                "saved-only".to_string(),
+                "Saved Only".to_string(),
+                json!({
+                    "apiKey": "sk-saved-old",
+                    "baseUrl": "https://saved.old.example/v1",
+                    "models": [{ "id": "saved-model" }]
+                }),
+                None,
+            ),
+        );
+    }
+
+    let openclaw_dir = home.join(".openclaw");
+    std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+    let openclaw_path = openclaw_dir.join("openclaw.json");
+    let original_text = r#"// keep-live-comment
+{
+  models: {
+    mode: 'merge',
+    providers: {
+      keep: {
+        apiKey: 'sk-keep',
+        baseUrl: 'https://keep.example/v1',
+        models: [{ id: 'keep-model' }],
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      model: {
+        primary: 'keep/keep-model',
+      },
+    },
+  },
+}
+"#;
+    std::fs::write(&openclaw_path, original_text).expect("seed openclaw live config");
+
+    let state = state_from_config(config);
+
+    cc_switch_lib::ProviderService::update(
+        &state,
+        AppType::OpenClaw,
+        Provider::with_id(
+            "saved-only".to_string(),
+            "Saved Only Updated".to_string(),
+            json!({
+                "apiKey": "sk-saved-new",
+                "baseUrl": "https://saved.new.example/v1",
+                "models": [{ "id": "saved-model-updated" }]
+            }),
+            None,
+        ),
+    )
+    .expect("updating saved-only openclaw provider should keep the edit in snapshot state");
+
+    let guard = state
+        .config
+        .read()
+        .expect("read config after saved-only update");
+    let provider = guard
+        .get_manager(&AppType::OpenClaw)
+        .and_then(|manager| manager.providers.get("saved-only"))
+        .expect("saved-only provider should remain in snapshot state");
+    assert_eq!(provider.name, "Saved Only Updated");
+    assert_eq!(
+        provider.settings_config["baseUrl"],
+        json!("https://saved.new.example/v1")
+    );
+    assert_eq!(
+        provider.settings_config["models"][0]["id"],
+        json!("saved-model-updated")
+    );
+
+    let live_after_text =
+        std::fs::read_to_string(&openclaw_path).expect("read openclaw live config");
+    let live_after = read_openclaw_live_config_json5(&openclaw_path);
+    assert_eq!(
+        live_after_text, original_text,
+        "saved-only backend update should leave the original openclaw.json text untouched"
+    );
+    assert!(
+        live_after["models"]["providers"]
+            .get("saved-only")
+            .is_none(),
+        "saved-only backend update should not implicitly add the provider into openclaw.json"
+    );
+    assert_eq!(
+        live_after["agents"]["defaults"]["model"]["primary"],
+        json!("keep/keep-model"),
+        "provider updates should still leave unrelated agents.defaults untouched"
+    );
+    assert!(
+        live_after_text.contains("keep:"),
+        "unrelated live providers should still be preserved after saved-only update"
+    );
+}
+
+#[test]
+fn provider_service_update_saved_only_openclaw_tolerates_broken_live_file() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::OpenClaw)
+            .expect("openclaw manager");
+        manager.providers.insert(
+            "saved-only".to_string(),
+            Provider::with_id(
+                "saved-only".to_string(),
+                "Saved Only".to_string(),
+                json!({
+                    "apiKey": "sk-saved-old",
+                    "baseUrl": "https://saved.old.example/v1",
+                    "models": [{ "id": "saved-model" }]
+                }),
+                None,
+            ),
+        );
+    }
+
+    let openclaw_dir = home.join(".openclaw");
+    std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+    let openclaw_path = openclaw_dir.join("openclaw.json");
+    let broken_live_text = "{ broken: [ }\n";
+    std::fs::write(&openclaw_path, broken_live_text).expect("seed broken openclaw live config");
+
+    let state = state_from_config(config);
+
+    cc_switch_lib::ProviderService::update(
+        &state,
+        AppType::OpenClaw,
+        Provider::with_id(
+            "saved-only".to_string(),
+            "Saved Only Updated".to_string(),
+            json!({
+                "apiKey": "sk-saved-new",
+                "baseUrl": "https://saved.new.example/v1",
+                "models": [{ "id": "saved-model-updated" }]
+            }),
+            None,
+        ),
+    )
+    .expect("saved-only update should still succeed when openclaw.json is broken");
+
+    let guard = state
+        .config
+        .read()
+        .expect("read config after saved-only update with broken live file");
+    let provider = guard
+        .get_manager(&AppType::OpenClaw)
+        .and_then(|manager| manager.providers.get("saved-only"))
+        .expect("saved-only provider should remain in snapshot state");
+    assert_eq!(provider.name, "Saved Only Updated");
+    assert_eq!(
+        provider.settings_config["baseUrl"],
+        json!("https://saved.new.example/v1")
+    );
+
+    let live_after_text =
+        std::fs::read_to_string(&openclaw_path).expect("read broken live config after update");
+    assert_eq!(
+        live_after_text, broken_live_text,
+        "saved-only update should not touch broken openclaw.json text"
+    );
+}
+
+#[test]
+fn provider_service_update_openclaw_rejects_when_model_catalog_refs_would_dangle() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::OpenClaw)
+            .expect("openclaw manager");
+        manager.providers.insert(
+            "keep".to_string(),
+            Provider::with_id(
+                "keep".to_string(),
+                "Keep".to_string(),
+                json!({
+                    "apiKey": "sk-keep",
+                    "baseUrl": "https://keep.example/v1",
+                    "models": [
+                        { "id": "primary-model" },
+                        { "id": "fallback-model" }
+                    ]
+                }),
+                None,
+            ),
+        );
+    }
+
+    let openclaw_dir = home.join(".openclaw");
+    std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+    let openclaw_path = openclaw_dir.join("openclaw.json");
+    let original_text = r#"{
+  models: {
+    mode: 'merge',
+    providers: {
+      keep: {
+        apiKey: 'sk-keep',
+        baseUrl: 'https://keep.example/v1',
+        models: [
+          { id: 'primary-model' },
+          { id: 'fallback-model' },
+        ],
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      models: {
+        'keep/fallback-model': {
+          alias: 'Fallback',
+        },
+      },
+    },
+  },
+}
+"#;
+    std::fs::write(&openclaw_path, original_text).expect("seed openclaw live config");
+
+    let state = state_from_config(config);
+
+    let err = cc_switch_lib::ProviderService::update(
+        &state,
+        AppType::OpenClaw,
+        Provider::with_id(
+            "keep".to_string(),
+            "Keep".to_string(),
+            json!({
+                "apiKey": "sk-keep",
+                "baseUrl": "https://keep.example/v2",
+                "models": [{ "id": "primary-model" }]
+            }),
+            None,
+        ),
+    )
+    .expect_err("OpenClaw update should reject edits that orphan agents.defaults.models refs");
+
+    match err {
+        AppError::Localized { key, .. } => {
+            assert_eq!(key, "openclaw.default_model.provider_model_missing")
+        }
+        other => panic!("expected localized dangling-model-catalog error, got {other:?}"),
+    }
+
+    let guard = state
+        .config
+        .read()
+        .expect("read config after rejected update");
+    let provider = guard
+        .get_manager(&AppType::OpenClaw)
+        .and_then(|manager| manager.providers.get("keep"))
+        .expect("provider should remain in saved state after rejected update");
+    assert_eq!(
+        provider.settings_config["baseUrl"],
+        json!("https://keep.example/v1")
+    );
+    assert_eq!(
+        provider.settings_config["models"][1]["id"],
+        json!("fallback-model")
+    );
+
+    let live_after_text =
+        std::fs::read_to_string(&openclaw_path).expect("read openclaw live config after reject");
+    assert_eq!(
+        live_after_text, original_text,
+        "rejecting a model-catalog-dangling update should leave openclaw.json text untouched"
+    );
+}
+
+#[test]
+fn provider_service_update_in_config_openclaw_updates_live_config() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::OpenClaw)
+            .expect("openclaw manager");
+        manager.providers.insert(
+            "keep".to_string(),
+            Provider::with_id(
+                "keep".to_string(),
+                "Keep".to_string(),
+                json!({
+                    "apiKey": "sk-keep-old",
+                    "baseUrl": "https://keep.old.example/v1",
+                    "models": [{ "id": "keep-model" }]
+                }),
+                None,
+            ),
+        );
+    }
+
+    let openclaw_dir = home.join(".openclaw");
+    std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+    let openclaw_path = openclaw_dir.join("openclaw.json");
+    std::fs::write(
+        &openclaw_path,
+        r#"{
+            models: {
+                mode: 'merge',
+                providers: {
+                    keep: {
+                        apiKey: 'sk-keep-old',
+                        baseUrl: 'https://keep.old.example/v1',
+                        models: [{ id: 'keep-model' }],
+                    },
+                },
+            },
+        }"#,
+    )
+    .expect("seed openclaw live config");
+
+    let state = state_from_config(config);
+
+    cc_switch_lib::ProviderService::update(
+        &state,
+        AppType::OpenClaw,
+        Provider::with_id(
+            "keep".to_string(),
+            "Keep Updated".to_string(),
+            json!({
+                "apiKey": "sk-keep-new",
+                "baseUrl": "https://keep.new.example/v1",
+                "models": [{ "id": "keep-model-updated" }]
+            }),
+            None,
+        ),
+    )
+    .expect("updating in-config openclaw provider should still sync live config");
+
+    let live_after = read_openclaw_live_config_json5(&openclaw_path);
+    assert_eq!(
+        live_after["models"]["providers"]["keep"]["baseUrl"],
+        json!("https://keep.new.example/v1")
+    );
+    assert_eq!(
+        live_after["models"]["providers"]["keep"]["models"][0]["id"],
+        json!("keep-model-updated")
+    );
+}
+
+#[test]
+fn provider_service_update_openclaw_rejects_when_default_model_refs_would_dangle() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::OpenClaw)
+            .expect("openclaw manager");
+        manager.providers.insert(
+            "keep".to_string(),
+            Provider::with_id(
+                "keep".to_string(),
+                "Keep".to_string(),
+                json!({
+                    "apiKey": "sk-keep",
+                    "baseUrl": "https://keep.example/v1",
+                    "models": [
+                        { "id": "primary-model" },
+                        { "id": "fallback-model" }
+                    ]
+                }),
+                None,
+            ),
+        );
+    }
+
+    let openclaw_dir = home.join(".openclaw");
+    std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+    let openclaw_path = openclaw_dir.join("openclaw.json");
+    let original_text = r#"{
+  models: {
+    mode: 'merge',
+    providers: {
+      keep: {
+        apiKey: 'sk-keep',
+        baseUrl: 'https://keep.example/v1',
+        models: [
+          { id: 'primary-model' },
+          { id: 'fallback-model' },
+        ],
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      model: {
+        primary: 'keep/fallback-model',
+        fallbacks: ['keep/primary-model'],
+      },
+    },
+  },
+}
+"#;
+    std::fs::write(&openclaw_path, original_text).expect("seed openclaw live config");
+
+    let state = state_from_config(config);
+
+    let err = cc_switch_lib::ProviderService::update(
+        &state,
+        AppType::OpenClaw,
+        Provider::with_id(
+            "keep".to_string(),
+            "Keep".to_string(),
+            json!({
+                "apiKey": "sk-keep",
+                "baseUrl": "https://keep.example/v2",
+                "models": [{ "id": "primary-model" }]
+            }),
+            None,
+        ),
+    )
+    .expect_err("OpenClaw live update should reject edits that orphan default model refs");
+
+    match err {
+        AppError::Localized { key, .. } => {
+            assert_eq!(key, "openclaw.default_model.provider_model_missing")
+        }
+        other => panic!("expected localized dangling-default-model error, got {other:?}"),
+    }
+
+    let guard = state.config.read().expect("read config after update");
+    let provider = guard
+        .get_manager(&AppType::OpenClaw)
+        .and_then(|manager| manager.providers.get("keep"))
+        .expect("provider should remain in saved state after update");
+    assert_eq!(
+        provider.settings_config["baseUrl"],
+        json!("https://keep.example/v1")
+    );
+    assert_eq!(
+        provider.settings_config["models"][0]["id"],
+        json!("primary-model")
+    );
+    assert_eq!(
+        provider.settings_config["models"][1]["id"],
+        json!("fallback-model")
+    );
+
+    let live_after = read_openclaw_live_config_json5(&openclaw_path);
+    assert_eq!(
+        live_after["models"]["providers"]["keep"]["baseUrl"],
+        json!("https://keep.example/v1")
+    );
+    assert_eq!(
+        live_after["models"]["providers"]["keep"]["models"],
+        json!([{ "id": "primary-model" }, { "id": "fallback-model" }])
+    );
+    assert_eq!(
+        live_after["agents"]["defaults"]["model"]["primary"],
+        json!("keep/fallback-model"),
+        "provider updates should not rewrite unrelated agents.defaults state"
+    );
+}
+
+#[test]
 fn provider_service_import_default_openclaw_skips_additive_mode() {
     let _guard = lock_test_mutex();
     reset_test_fs();
@@ -2196,7 +2776,7 @@ fn provider_service_delete_openclaw_removes_provider_from_live_and_state() {
 }
 
 #[test]
-fn provider_service_delete_openclaw_default_provider_removes_provider_like_upstream() {
+fn provider_service_delete_openclaw_default_provider_rejects_when_default_model_would_dangle() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -2258,25 +2838,32 @@ fn provider_service_delete_openclaw_default_provider_removes_provider_like_upstr
 
     let app_state = state_from_config(config);
 
-    ProviderService::delete(&app_state, AppType::OpenClaw, "keep")
-        .expect("deleting an OpenClaw provider should follow upstream additive semantics");
+    let err = ProviderService::delete(&app_state, AppType::OpenClaw, "keep")
+        .expect_err("deleting a default-referenced OpenClaw provider should be rejected");
+
+    match err {
+        AppError::Localized { key, .. } => {
+            assert_eq!(key, "openclaw.default_model.provider_missing")
+        }
+        other => panic!("expected localized dangling-default-model error, got {other:?}"),
+    }
 
     let locked = app_state.config.read().expect("lock config after delete");
     let manager = locked
         .get_manager(&AppType::OpenClaw)
         .expect("openclaw manager after delete");
-    assert!(!manager.providers.contains_key("keep"));
+    assert!(manager.providers.contains_key("keep"));
 
     let live_after = read_openclaw_live_config_json5(&openclaw_path);
     assert_eq!(
         live_after["agents"]["defaults"]["model"]["primary"],
         "keep/fallback-model"
     );
-    assert!(live_after["models"]["providers"].get("keep").is_none());
+    assert!(live_after["models"]["providers"].get("keep").is_some());
 }
 
 #[test]
-fn provider_service_delete_openclaw_provider_referenced_only_by_fallback_removes_provider_like_upstream(
+fn provider_service_delete_openclaw_provider_referenced_only_by_fallback_rejects_when_default_model_would_dangle(
 ) {
     let _guard = lock_test_mutex();
     reset_test_fs();
@@ -2339,25 +2926,32 @@ fn provider_service_delete_openclaw_provider_referenced_only_by_fallback_removes
 
     let app_state = state_from_config(config);
 
-    ProviderService::delete(&app_state, AppType::OpenClaw, "keep")
-        .expect("deleting fallback-referenced OpenClaw provider should follow upstream semantics");
+    let err = ProviderService::delete(&app_state, AppType::OpenClaw, "keep")
+        .expect_err("deleting a fallback-referenced OpenClaw provider should be rejected");
+
+    match err {
+        AppError::Localized { key, .. } => {
+            assert_eq!(key, "openclaw.default_model.provider_missing")
+        }
+        other => panic!("expected localized dangling-default-model error, got {other:?}"),
+    }
 
     let locked = app_state.config.read().expect("lock config after delete");
     let manager = locked
         .get_manager(&AppType::OpenClaw)
         .expect("openclaw manager after delete");
-    assert!(!manager.providers.contains_key("keep"));
+    assert!(manager.providers.contains_key("keep"));
 
     let live_after = read_openclaw_live_config_json5(&openclaw_path);
     assert_eq!(
         live_after["agents"]["defaults"]["model"]["fallbacks"],
         json!(["keep/fallback-model"])
     );
-    assert!(live_after["models"]["providers"].get("keep").is_none());
+    assert!(live_after["models"]["providers"].get("keep").is_some());
 }
 
 #[test]
-fn provider_service_switch_openclaw_rolls_back_preserving_original_document_text() {
+fn provider_service_switch_openclaw_ignores_unrelated_mcp_sync_failures() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -2449,18 +3043,22 @@ fn provider_service_switch_openclaw_rolls_back_preserving_original_document_text
 
     let state = state_from_config(config);
 
-    let err = ProviderService::switch(&state, AppType::OpenClaw, "target")
-        .expect_err("broken MCP sync should force rollback");
-    match err {
-        AppError::McpValidation(_) | AppError::Config(_) | AppError::Localized { .. } => {}
-        other => panic!("expected MCP/config-related error, got {other:?}"),
-    }
+    ProviderService::switch(&state, AppType::OpenClaw, "target")
+        .expect("OpenClaw switch should ignore unrelated MCP sync failures");
 
-    let live_after = std::fs::read_to_string(&openclaw_path)
-        .expect("read openclaw live config after rolled back switch");
+    let live_after = read_openclaw_live_config_json5(&openclaw_path);
     assert_eq!(
-        live_after, original_text,
-        "rollback should restore the original JSON5 document text verbatim"
+        live_after
+            .pointer("/models/providers/target/baseUrl")
+            .and_then(|value| value.as_str()),
+        Some("https://target.example/v1"),
+        "switch should still update OpenClaw live config"
+    );
+
+    let opencode_path = home.join(".config").join("opencode").join("opencode.json");
+    assert!(
+        !opencode_path.exists(),
+        "OpenClaw switch should not trigger OpenCode MCP sync side effects"
     );
 }
 

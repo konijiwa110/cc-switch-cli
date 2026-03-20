@@ -37,7 +37,7 @@ impl App {
                 };
                 if matches!(self.app_type, AppType::OpenClaw) {
                     if row.is_in_config {
-                        if row.default_model_id.is_some() {
+                        if row.is_default_model {
                             self.push_toast(
                                 texts::tui_toast_provider_cannot_remove_default_model(),
                                 ToastKind::Warning,
@@ -149,7 +149,7 @@ impl App {
             KeyCode::Char('s') => {
                 if matches!(self.app_type, AppType::OpenClaw) {
                     if row.is_in_config {
-                        if row.default_model_id.is_some() {
+                        if row.is_default_model {
                             self.push_toast(
                                 texts::tui_toast_provider_cannot_remove_default_model(),
                                 ToastKind::Warning,

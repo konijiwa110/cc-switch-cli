@@ -541,8 +541,7 @@ fn provider_point_updates_preserve_models_mode_and_other_provider_keys() {
 
 #[test]
 #[serial]
-fn set_provider_rejects_default_model_refs_that_would_become_dangling_without_rewriting_agents_section(
-) {
+fn set_provider_allows_default_model_refs_to_become_dangling_without_rewriting_agents_section() {
     let source = r#"{
   // preserve root comment
   models: {
@@ -570,7 +569,7 @@ fn set_provider_rejects_default_model_refs_that_would_become_dangling_without_re
 "#;
 
     with_fixture(source, |config_path| {
-        let err = set_provider(
+        set_provider(
             "keep",
             json!({
                 "baseUrl": "https://keep.example/v2",
@@ -578,28 +577,17 @@ fn set_provider_rejects_default_model_refs_that_would_become_dangling_without_re
                 "models": [{ "id": "primary-model" }]
             }),
         )
-        .expect_err("provider write should reject edits that orphan default model refs");
-
-        match err {
-            crate::error::AppError::Localized { key, .. } => {
-                assert_eq!(key, "openclaw.default_model.provider_model_missing");
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        .expect("provider write should allow default model refs to become dangling");
 
         let written = fs::read_to_string(config_path).expect("read config after edit");
-        assert_eq!(
-            written, source,
-            "rejecting the write should leave openclaw.json text untouched"
-        );
         let parsed: serde_json::Value = json5::from_str(&written).expect("parse rewritten config");
         assert_eq!(
             parsed["models"]["providers"]["keep"]["baseUrl"],
-            json!("https://keep.example/v1")
+            json!("https://keep.example/v2")
         );
         assert_eq!(
             parsed["models"]["providers"]["keep"]["models"],
-            json!([{ "id": "primary-model" }, { "id": "fallback-model" }])
+            json!([{ "id": "primary-model" }])
         );
         assert_eq!(
             parsed["agents"]["defaults"]["model"]["primary"],
@@ -610,8 +598,7 @@ fn set_provider_rejects_default_model_refs_that_would_become_dangling_without_re
 
 #[test]
 #[serial]
-fn remove_provider_rejects_default_model_refs_that_would_become_dangling_without_rewriting_agents_section(
-) {
+fn remove_provider_allows_default_model_refs_to_become_dangling_without_rewriting_agents_section() {
     let source = r#"{
   // preserve root comment
   models: {
@@ -639,23 +626,11 @@ fn remove_provider_rejects_default_model_refs_that_would_become_dangling_without
 "#;
 
     with_fixture(source, |config_path| {
-        let err = remove_provider("keep")
-            .expect_err("provider removal should reject dangling default model refs");
-
-        match err {
-            crate::error::AppError::Localized { key, .. } => {
-                assert_eq!(key, "openclaw.default_model.provider_missing");
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        remove_provider("keep").expect("provider removal should allow dangling default model refs");
 
         let written = fs::read_to_string(config_path).expect("read config after remove");
-        assert_eq!(
-            written, source,
-            "rejecting the removal should leave openclaw.json text untouched"
-        );
         let parsed: serde_json::Value = json5::from_str(&written).expect("parse rewritten config");
-        assert!(parsed["models"]["providers"].get("keep").is_some());
+        assert!(parsed["models"]["providers"].get("keep").is_none());
         assert_eq!(
             parsed["agents"]["defaults"]["model"]["primary"],
             json!("keep/fallback-model")
@@ -665,8 +640,7 @@ fn remove_provider_rejects_default_model_refs_that_would_become_dangling_without
 
 #[test]
 #[serial]
-fn set_provider_rejects_agents_defaults_models_refs_that_would_become_dangling_and_keeps_text_unchanged(
-) {
+fn set_provider_allows_agents_defaults_models_refs_to_become_dangling_and_keeps_agents_text() {
     let source = r#"{
   // preserve root comment
   models: {
@@ -695,7 +669,7 @@ fn set_provider_rejects_agents_defaults_models_refs_that_would_become_dangling_a
 "#;
 
     with_fixture(source, |config_path| {
-        let err = set_provider(
+        set_provider(
             "keep",
             json!({
                 "baseUrl": "https://keep.example/v2",
@@ -703,27 +677,24 @@ fn set_provider_rejects_agents_defaults_models_refs_that_would_become_dangling_a
                 "models": [{ "id": "primary-model" }]
             }),
         )
-        .expect_err("provider write should reject edits that orphan agents.defaults.models refs");
+        .expect("provider write should allow agents.defaults.models refs to become dangling");
 
-        match err {
-            crate::error::AppError::Localized { key, .. } => {
-                assert_eq!(key, "openclaw.default_model.provider_model_missing");
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-
-        let written = fs::read_to_string(config_path).expect("read config after rejected edit");
+        let written = fs::read_to_string(config_path).expect("read config after edit");
+        let parsed: serde_json::Value = json5::from_str(&written).expect("parse rewritten config");
         assert_eq!(
-            written, source,
-            "rejecting the model-catalog-dangling write should leave openclaw.json text untouched"
+            parsed["models"]["providers"]["keep"]["baseUrl"],
+            json!("https://keep.example/v2")
+        );
+        assert_eq!(
+            parsed["agents"]["defaults"]["models"]["keep/fallback-model"]["alias"],
+            json!("Fallback")
         );
     });
 }
 
 #[test]
 #[serial]
-fn remove_provider_rejects_agents_defaults_models_refs_that_would_become_dangling_and_keeps_text_unchanged(
-) {
+fn remove_provider_allows_agents_defaults_models_refs_to_become_dangling_and_keeps_agents_text() {
     let source = r#"{
   // preserve root comment
   models: {
@@ -752,27 +723,22 @@ fn remove_provider_rejects_agents_defaults_models_refs_that_would_become_danglin
 "#;
 
     with_fixture(source, |config_path| {
-        let err = remove_provider("keep")
-            .expect_err("provider removal should reject dangling agents.defaults.models refs");
+        remove_provider("keep")
+            .expect("provider removal should allow dangling agents.defaults.models refs");
 
-        match err {
-            crate::error::AppError::Localized { key, .. } => {
-                assert_eq!(key, "openclaw.default_model.provider_missing");
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-
-        let written = fs::read_to_string(config_path).expect("read config after rejected remove");
+        let written = fs::read_to_string(config_path).expect("read config after remove");
+        let parsed: serde_json::Value = json5::from_str(&written).expect("parse rewritten config");
+        assert!(parsed["models"]["providers"].get("keep").is_none());
         assert_eq!(
-            written, source,
-            "rejecting the model-catalog-dangling removal should leave openclaw.json text untouched"
+            parsed["agents"]["defaults"]["models"]["keep/fallback-model"]["alias"],
+            json!("Fallback")
         );
     });
 }
 
 #[test]
 #[serial]
-fn set_provider_rejects_invalid_default_model_reference_format_without_changing_text() {
+fn set_provider_ignores_invalid_default_model_reference_format() {
     let source = r#"{
   models: {
     mode: 'merge',
@@ -795,31 +761,31 @@ fn set_provider_rejects_invalid_default_model_reference_format_without_changing_
 "#;
 
     with_fixture(source, |config_path| {
-        let err = set_provider(
+        set_provider(
             "keep",
             json!({
                 "baseUrl": "https://keep.example/v2",
                 "models": [{ "id": "primary-model" }]
             }),
         )
-        .expect_err("invalid default model ref format should be rejected before membership checks");
+        .expect("invalid default model ref format should not block provider writes");
 
-        match err {
-            crate::error::AppError::Localized { key, .. } => {
-                assert_eq!(key, "openclaw.default_model.invalid_reference");
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-
-        let written = fs::read_to_string(config_path)
-            .expect("read config after rejected invalid-format write");
-        assert_eq!(written, source);
+        let written = fs::read_to_string(config_path).expect("read config after write");
+        let parsed: serde_json::Value = json5::from_str(&written).expect("parse rewritten config");
+        assert_eq!(
+            parsed["models"]["providers"]["keep"]["baseUrl"],
+            json!("https://keep.example/v2")
+        );
+        assert_eq!(
+            parsed["agents"]["defaults"]["model"]["primary"],
+            json!("keep/primary-model/extra")
+        );
     });
 }
 
 #[test]
 #[serial]
-fn remove_provider_rejects_invalid_model_catalog_reference_format_without_changing_text() {
+fn remove_provider_ignores_invalid_model_catalog_reference_format() {
     let source = r#"{
   models: {
     mode: 'merge',
@@ -843,20 +809,16 @@ fn remove_provider_rejects_invalid_model_catalog_reference_format_without_changi
 "#;
 
     with_fixture(source, |config_path| {
-        let err = remove_provider("keep").expect_err(
-            "invalid model catalog ref format should be rejected before membership checks",
+        remove_provider("keep")
+            .expect("invalid model catalog ref format should not block provider removal");
+
+        let written = fs::read_to_string(config_path).expect("read config after remove");
+        let parsed: serde_json::Value = json5::from_str(&written).expect("parse rewritten config");
+        assert!(parsed["models"]["providers"].get("keep").is_none());
+        assert_eq!(
+            parsed["agents"]["defaults"]["models"]["keep/primary-model/extra"]["alias"],
+            json!("Broken")
         );
-
-        match err {
-            crate::error::AppError::Localized { key, .. } => {
-                assert_eq!(key, "openclaw.default_model.invalid_reference");
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-
-        let written = fs::read_to_string(config_path)
-            .expect("read config after rejected invalid-format remove");
-        assert_eq!(written, source);
     });
 }
 
@@ -884,7 +846,7 @@ fn set_agents_defaults_preserves_sibling_agents_keys() {
 
 #[test]
 #[serial]
-fn set_default_model_rejects_dangling_refs_without_changing_text() {
+fn set_default_model_allows_dangling_refs() {
     let source = r#"{
   models: {
     mode: 'merge',
@@ -899,29 +861,30 @@ fn set_default_model_rejects_dangling_refs_without_changing_text() {
 "#;
 
     with_fixture(source, |config_path| {
-        let err = set_default_model(&OpenClawDefaultModel {
+        set_default_model(&OpenClawDefaultModel {
             primary: "keep/missing-model".to_string(),
             fallbacks: vec!["keep/primary-model".to_string()],
             extra: HashMap::new(),
         })
-        .expect_err("dangling default-model refs should be rejected");
+        .expect("dangling default-model refs should be writable");
 
-        match err {
-            crate::error::AppError::Localized { key, .. } => {
-                assert_eq!(key, "openclaw.default_model.provider_model_missing");
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-
-        let written = fs::read_to_string(config_path)
-            .expect("read config after rejected default-model write");
-        assert_eq!(written, source);
+        let written =
+            fs::read_to_string(config_path).expect("read config after default-model write");
+        let parsed: serde_json::Value = json5::from_str(&written).expect("parse rewritten config");
+        assert_eq!(
+            parsed["agents"]["defaults"]["model"]["primary"],
+            json!("keep/missing-model")
+        );
+        assert_eq!(
+            parsed["agents"]["defaults"]["model"]["fallbacks"],
+            json!(["keep/primary-model"])
+        );
     });
 }
 
 #[test]
 #[serial]
-fn set_model_catalog_rejects_invalid_reference_format_without_changing_text() {
+fn set_model_catalog_allows_invalid_reference_format() {
     let source = r#"{
   models: {
     mode: 'merge',
@@ -936,31 +899,28 @@ fn set_model_catalog_rejects_invalid_reference_format_without_changing_text() {
 "#;
 
     with_fixture(source, |config_path| {
-        let err = set_model_catalog(&HashMap::from([(
+        set_model_catalog(&HashMap::from([(
             "keep/primary-model/extra".to_string(),
             OpenClawModelCatalogEntry {
                 alias: Some("Broken".to_string()),
                 extra: HashMap::new(),
             },
         )]))
-        .expect_err("invalid model catalog refs should be rejected");
+        .expect("invalid model catalog refs should still be writable");
 
-        match err {
-            crate::error::AppError::Localized { key, .. } => {
-                assert_eq!(key, "openclaw.default_model.invalid_reference");
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-
-        let written = fs::read_to_string(config_path)
-            .expect("read config after rejected model-catalog write");
-        assert_eq!(written, source);
+        let written =
+            fs::read_to_string(config_path).expect("read config after model-catalog write");
+        let parsed: serde_json::Value = json5::from_str(&written).expect("parse rewritten config");
+        assert_eq!(
+            parsed["agents"]["defaults"]["models"]["keep/primary-model/extra"]["alias"],
+            json!("Broken")
+        );
     });
 }
 
 #[test]
 #[serial]
-fn set_agents_defaults_rejects_dangling_model_catalog_refs_without_changing_text() {
+fn set_agents_defaults_allows_dangling_model_catalog_refs() {
     let source = r#"{
   models: {
     mode: 'merge',
@@ -975,7 +935,7 @@ fn set_agents_defaults_rejects_dangling_model_catalog_refs_without_changing_text
 "#;
 
     with_fixture(source, |config_path| {
-        let err = set_agents_defaults(&OpenClawAgentsDefaults {
+        set_agents_defaults(&OpenClawAgentsDefaults {
             model: Some(OpenClawDefaultModel {
                 primary: "keep/primary-model".to_string(),
                 fallbacks: Vec::new(),
@@ -990,18 +950,82 @@ fn set_agents_defaults_rejects_dangling_model_catalog_refs_without_changing_text
             )])),
             extra: HashMap::new(),
         })
-        .expect_err("dangling agents.defaults.models refs should be rejected");
+        .expect("dangling agents.defaults.models refs should be writable");
 
-        match err {
-            crate::error::AppError::Localized { key, .. } => {
-                assert_eq!(key, "openclaw.default_model.provider_missing");
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        let written =
+            fs::read_to_string(config_path).expect("read config after agents.defaults write");
+        let parsed: serde_json::Value = json5::from_str(&written).expect("parse rewritten config");
+        assert_eq!(
+            parsed["agents"]["defaults"]["models"]["missing/fallback-model"]["alias"],
+            json!("Fallback")
+        );
+        assert_eq!(
+            parsed["agents"]["defaults"]["model"]["primary"],
+            json!("keep/primary-model")
+        );
+    });
+}
 
-        let written = fs::read_to_string(config_path)
-            .expect("read config after rejected agents.defaults write");
-        assert_eq!(written, source);
+#[test]
+#[serial]
+fn set_agents_defaults_allows_recovery_write_after_remove_provider_leaves_dangling_default_model() {
+    let source = r#"{
+  models: {
+    mode: 'merge',
+    providers: {
+      keep: {
+        baseUrl: 'https://keep.example/v1',
+        models: [{ id: 'primary-model' }],
+      },
+      other: {
+        baseUrl: 'https://other.example/v1',
+        models: [{ id: 'other-model' }],
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      model: {
+        primary: 'keep/primary-model',
+      },
+    },
+  },
+}
+"#;
+
+    with_fixture(source, |_| {
+        remove_provider("keep").expect("provider removal should create dangling default model");
+
+        set_agents_defaults(&OpenClawAgentsDefaults {
+            model: Some(OpenClawDefaultModel {
+                primary: "keep/primary-model".to_string(),
+                fallbacks: Vec::new(),
+                extra: HashMap::new(),
+            }),
+            models: Some(HashMap::from([(
+                "other/other-model".to_string(),
+                OpenClawModelCatalogEntry {
+                    alias: Some("Other".to_string()),
+                    extra: HashMap::new(),
+                },
+            )])),
+            extra: HashMap::from([("timeoutSeconds".to_string(), json!(30))]),
+        })
+        .expect(
+            "agents.defaults should remain writable after provider removal leaves dangling refs",
+        );
+
+        let config = read_openclaw_config().expect("read config after recovery write");
+        assert!(config["models"]["providers"].get("keep").is_none());
+        assert_eq!(
+            config["agents"]["defaults"]["model"]["primary"],
+            json!("keep/primary-model")
+        );
+        assert_eq!(
+            config["agents"]["defaults"]["models"]["other/other-model"]["alias"],
+            json!("Other")
+        );
+        assert_eq!(config["agents"]["defaults"]["timeoutSeconds"], json!(30));
     });
 }
 

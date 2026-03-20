@@ -1763,7 +1763,7 @@ fn provider_service_update_saved_only_openclaw_rejects_broken_live_file() {
 }
 
 #[test]
-fn provider_service_update_openclaw_rejects_when_model_catalog_refs_would_dangle() {
+fn provider_service_update_openclaw_allows_model_catalog_refs_to_dangle() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -1823,7 +1823,7 @@ fn provider_service_update_openclaw_rejects_when_model_catalog_refs_would_dangle
 
     let state = state_from_config(config);
 
-    let err = cc_switch_lib::ProviderService::update(
+    cc_switch_lib::ProviderService::update(
         &state,
         AppType::OpenClaw,
         Provider::with_id(
@@ -1837,37 +1837,30 @@ fn provider_service_update_openclaw_rejects_when_model_catalog_refs_would_dangle
             None,
         ),
     )
-    .expect_err("OpenClaw update should reject edits that orphan agents.defaults.models refs");
+    .expect("OpenClaw update should allow agents.defaults.models refs to become dangling");
 
-    match err {
-        AppError::Localized { key, .. } => {
-            assert_eq!(key, "openclaw.default_model.provider_model_missing")
-        }
-        other => panic!("expected localized dangling-model-catalog error, got {other:?}"),
-    }
-
-    let guard = state
-        .config
-        .read()
-        .expect("read config after rejected update");
+    let guard = state.config.read().expect("read config after update");
     let provider = guard
         .get_manager(&AppType::OpenClaw)
         .and_then(|manager| manager.providers.get("keep"))
-        .expect("provider should remain in saved state after rejected update");
+        .expect("provider should remain in saved state after update");
     assert_eq!(
         provider.settings_config["baseUrl"],
-        json!("https://keep.example/v1")
+        json!("https://keep.example/v2")
     );
     assert_eq!(
-        provider.settings_config["models"][1]["id"],
-        json!("fallback-model")
+        provider.settings_config["models"],
+        json!([{ "id": "primary-model" }])
     );
 
-    let live_after_text =
-        std::fs::read_to_string(&openclaw_path).expect("read openclaw live config after reject");
+    let live_after = read_openclaw_live_config_json5(&openclaw_path);
     assert_eq!(
-        live_after_text, original_text,
-        "rejecting a model-catalog-dangling update should leave openclaw.json text untouched"
+        live_after["models"]["providers"]["keep"]["baseUrl"],
+        json!("https://keep.example/v2")
+    );
+    assert_eq!(
+        live_after["agents"]["defaults"]["models"]["keep/fallback-model"]["alias"],
+        json!("Fallback")
     );
 }
 
@@ -2356,7 +2349,7 @@ fn provider_service_update_openclaw_rejects_legacy_alias_settings_shape_without_
 }
 
 #[test]
-fn provider_service_update_openclaw_rejects_when_default_model_refs_would_dangle() {
+fn provider_service_update_openclaw_allows_default_model_refs_to_dangle() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -2415,7 +2408,7 @@ fn provider_service_update_openclaw_rejects_when_default_model_refs_would_dangle
 
     let state = state_from_config(config);
 
-    let err = cc_switch_lib::ProviderService::update(
+    cc_switch_lib::ProviderService::update(
         &state,
         AppType::OpenClaw,
         Provider::with_id(
@@ -2429,14 +2422,7 @@ fn provider_service_update_openclaw_rejects_when_default_model_refs_would_dangle
             None,
         ),
     )
-    .expect_err("OpenClaw live update should reject edits that orphan default model refs");
-
-    match err {
-        AppError::Localized { key, .. } => {
-            assert_eq!(key, "openclaw.default_model.provider_model_missing")
-        }
-        other => panic!("expected localized dangling-default-model error, got {other:?}"),
-    }
+    .expect("OpenClaw live update should allow default model refs to become dangling");
 
     let guard = state.config.read().expect("read config after update");
     let provider = guard
@@ -2445,25 +2431,25 @@ fn provider_service_update_openclaw_rejects_when_default_model_refs_would_dangle
         .expect("provider should remain in saved state after update");
     assert_eq!(
         provider.settings_config["baseUrl"],
-        json!("https://keep.example/v1")
+        json!("https://keep.example/v2")
     );
     assert_eq!(
         provider.settings_config["models"][0]["id"],
         json!("primary-model")
     );
     assert_eq!(
-        provider.settings_config["models"][1]["id"],
-        json!("fallback-model")
+        provider.settings_config["models"].as_array().map(Vec::len),
+        Some(1)
     );
 
     let live_after = read_openclaw_live_config_json5(&openclaw_path);
     assert_eq!(
         live_after["models"]["providers"]["keep"]["baseUrl"],
-        json!("https://keep.example/v1")
+        json!("https://keep.example/v2")
     );
     assert_eq!(
         live_after["models"]["providers"]["keep"]["models"],
-        json!([{ "id": "primary-model" }, { "id": "fallback-model" }])
+        json!([{ "id": "primary-model" }])
     );
     assert_eq!(
         live_after["agents"]["defaults"]["model"]["primary"],
@@ -3735,7 +3721,7 @@ fn provider_service_delete_openclaw_removes_provider_from_live_and_state() {
 }
 
 #[test]
-fn provider_service_delete_openclaw_default_provider_rejects_when_default_model_would_dangle() {
+fn provider_service_delete_openclaw_default_provider_allows_dangling_default_model() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -3797,32 +3783,25 @@ fn provider_service_delete_openclaw_default_provider_rejects_when_default_model_
 
     let app_state = state_from_config(config);
 
-    let err = ProviderService::delete(&app_state, AppType::OpenClaw, "keep")
-        .expect_err("deleting a default-referenced OpenClaw provider should be rejected");
-
-    match err {
-        AppError::Localized { key, .. } => {
-            assert_eq!(key, "openclaw.default_model.provider_missing")
-        }
-        other => panic!("expected localized dangling-default-model error, got {other:?}"),
-    }
+    ProviderService::delete(&app_state, AppType::OpenClaw, "keep")
+        .expect("deleting a default-referenced OpenClaw provider should succeed");
 
     let locked = app_state.config.read().expect("lock config after delete");
     let manager = locked
         .get_manager(&AppType::OpenClaw)
         .expect("openclaw manager after delete");
-    assert!(manager.providers.contains_key("keep"));
+    assert!(!manager.providers.contains_key("keep"));
 
     let live_after = read_openclaw_live_config_json5(&openclaw_path);
     assert_eq!(
         live_after["agents"]["defaults"]["model"]["primary"],
         "keep/fallback-model"
     );
-    assert!(live_after["models"]["providers"].get("keep").is_some());
+    assert!(live_after["models"]["providers"].get("keep").is_none());
 }
 
 #[test]
-fn provider_service_delete_openclaw_provider_referenced_only_by_fallback_rejects_when_default_model_would_dangle(
+fn provider_service_delete_openclaw_provider_referenced_only_by_fallback_allows_dangling_default_model(
 ) {
     let _guard = lock_test_mutex();
     reset_test_fs();
@@ -3885,28 +3864,21 @@ fn provider_service_delete_openclaw_provider_referenced_only_by_fallback_rejects
 
     let app_state = state_from_config(config);
 
-    let err = ProviderService::delete(&app_state, AppType::OpenClaw, "keep")
-        .expect_err("deleting a fallback-referenced OpenClaw provider should be rejected");
-
-    match err {
-        AppError::Localized { key, .. } => {
-            assert_eq!(key, "openclaw.default_model.provider_missing")
-        }
-        other => panic!("expected localized dangling-default-model error, got {other:?}"),
-    }
+    ProviderService::delete(&app_state, AppType::OpenClaw, "keep")
+        .expect("deleting a fallback-referenced OpenClaw provider should succeed");
 
     let locked = app_state.config.read().expect("lock config after delete");
     let manager = locked
         .get_manager(&AppType::OpenClaw)
         .expect("openclaw manager after delete");
-    assert!(manager.providers.contains_key("keep"));
+    assert!(!manager.providers.contains_key("keep"));
 
     let live_after = read_openclaw_live_config_json5(&openclaw_path);
     assert_eq!(
         live_after["agents"]["defaults"]["model"]["fallbacks"],
         json!(["keep/fallback-model"])
     );
-    assert!(live_after["models"]["providers"].get("keep").is_some());
+    assert!(live_after["models"]["providers"].get("keep").is_none());
 }
 
 #[test]

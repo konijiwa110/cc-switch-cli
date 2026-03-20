@@ -680,154 +680,6 @@ fn default_model_from_config(config: &Value) -> Result<Option<OpenClawDefaultMod
     Ok(Some(model))
 }
 
-enum DanglingDefaultModelRef {
-    InvalidFormat {
-        model_ref: String,
-    },
-    MissingProvider {
-        model_ref: String,
-        provider_id: String,
-    },
-    MissingModel {
-        model_ref: String,
-        provider_id: String,
-        model_id: String,
-    },
-}
-
-fn provider_contains_model_id(provider_value: &Value, model_id: &str) -> bool {
-    provider_value
-        .get("models")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .any(|model| model.get("id").and_then(Value::as_str) == Some(model_id))
-}
-
-fn parse_default_model_ref(model_ref: &str) -> Option<(&str, &str)> {
-    let (provider_id, model_id) = model_ref.split_once('/')?;
-    if provider_id.is_empty() || model_id.is_empty() || model_id.contains('/') {
-        return None;
-    }
-    Some((provider_id, model_id))
-}
-
-fn classify_default_model_ref(
-    providers: &Map<String, Value>,
-    model_ref: &str,
-) -> Option<DanglingDefaultModelRef> {
-    let (provider_id, model_id) = parse_default_model_ref(model_ref)?;
-    let Some(provider_value) = providers.get(provider_id) else {
-        return Some(DanglingDefaultModelRef::MissingProvider {
-            model_ref: model_ref.to_string(),
-            provider_id: provider_id.to_string(),
-        });
-    };
-
-    if provider_contains_model_id(provider_value, model_id) {
-        None
-    } else {
-        Some(DanglingDefaultModelRef::MissingModel {
-            model_ref: model_ref.to_string(),
-            provider_id: provider_id.to_string(),
-            model_id: model_id.to_string(),
-        })
-    }
-}
-
-fn first_dangling_default_model_ref(
-    config: &Value,
-) -> Result<Option<DanglingDefaultModelRef>, AppError> {
-    let providers = config
-        .get("models")
-        .and_then(|models| models.get("providers"))
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-
-    if let Some(default_model) = default_model_from_config(config)? {
-        for model_ref in std::iter::once(default_model.primary.as_str())
-            .chain(default_model.fallbacks.iter().map(String::as_str))
-        {
-            match parse_default_model_ref(model_ref) {
-                Some(_) => {
-                    if let Some(dangling) = classify_default_model_ref(&providers, model_ref) {
-                        return Ok(Some(dangling));
-                    }
-                }
-                None => {
-                    return Ok(Some(DanglingDefaultModelRef::InvalidFormat {
-                        model_ref: model_ref.to_string(),
-                    }));
-                }
-            }
-        }
-    }
-
-    if let Some(model_catalog) = config
-        .get("agents")
-        .and_then(|agents| agents.get("defaults"))
-        .and_then(|defaults| defaults.get("models"))
-        .and_then(Value::as_object)
-    {
-        for model_ref in model_catalog.keys() {
-            match parse_default_model_ref(model_ref) {
-                Some(_) => {
-                    if let Some(dangling) = classify_default_model_ref(&providers, model_ref) {
-                        return Ok(Some(dangling));
-                    }
-                }
-                None => {
-                    return Ok(Some(DanglingDefaultModelRef::InvalidFormat {
-                        model_ref: model_ref.clone(),
-                    }));
-                }
-            }
-        }
-    }
-
-    Ok(None)
-}
-
-fn reject_dangling_default_model_refs(config: &Value) -> Result<(), AppError> {
-    let Some(dangling) = first_dangling_default_model_ref(config)? else {
-        return Ok(());
-    };
-
-    Err(match dangling {
-        DanglingDefaultModelRef::InvalidFormat { model_ref } => AppError::localized(
-            "openclaw.default_model.invalid_reference",
-            format!("OpenClaw 默认模型引用格式无效，必须使用 provider/model：{model_ref}"),
-            format!("OpenClaw default model reference must use provider/model format: {model_ref}"),
-        ),
-        DanglingDefaultModelRef::MissingProvider {
-            model_ref,
-            provider_id,
-        } => AppError::localized(
-            "openclaw.default_model.provider_missing",
-            format!(
-                "不能让 OpenClaw 默认模型引用悬空：缺少 provider `{provider_id}`（{model_ref}）"
-            ),
-            format!(
-                "Cannot leave OpenClaw default model dangling: missing provider `{provider_id}` ({model_ref})"
-            ),
-        ),
-        DanglingDefaultModelRef::MissingModel {
-            model_ref,
-            provider_id,
-            model_id,
-        } => AppError::localized(
-            "openclaw.default_model.provider_model_missing",
-            format!(
-                "不能让 OpenClaw 默认模型引用悬空：provider `{provider_id}` 缺少模型 `{model_id}`（{model_ref}）"
-            ),
-            format!(
-                "Cannot leave OpenClaw default model dangling: provider `{provider_id}` is missing model `{model_id}` ({model_ref})"
-            ),
-        ),
-    })
-}
-
 pub fn get_providers() -> Result<Map<String, Value>, AppError> {
     let config = read_openclaw_config()?;
     Ok(config
@@ -858,8 +710,6 @@ pub fn set_provider(id: &str, provider_config: Value) -> Result<OpenClawWriteOut
         ensure_object(providers).insert(id.to_string(), provider_config);
     }
 
-    reject_dangling_default_model_refs(&full_config)?;
-
     let models_value = full_config.get("models").cloned().unwrap_or_else(|| {
         json!({
             "mode": "merge",
@@ -884,8 +734,6 @@ pub fn remove_provider(id: &str) -> Result<OpenClawWriteOutcome, AppError> {
     if !removed {
         return Ok(OpenClawWriteOutcome::default());
     }
-
-    reject_dangling_default_model_refs(&config)?;
 
     let models_value = config.get("models").cloned().unwrap_or_else(|| {
         json!({
@@ -915,8 +763,6 @@ pub fn set_default_model(model: &OpenClawDefaultModel) -> Result<OpenClawWriteOu
             .or_insert_with(|| Value::Object(Map::new()));
         ensure_object(defaults).insert("model".to_string(), model_value);
     }
-
-    reject_dangling_default_model_refs(&config)?;
 
     let agents_value = config
         .get("agents")
@@ -985,8 +831,6 @@ pub fn set_model_catalog(
         ensure_object(defaults).insert("models".to_string(), catalog_value);
     }
 
-    reject_dangling_default_model_refs(&config)?;
-
     let agents_value = config
         .get("agents")
         .cloned()
@@ -1023,8 +867,6 @@ pub fn set_agents_defaults(
             .or_insert_with(|| Value::Object(Map::new()));
         ensure_object(agents).insert("defaults".to_string(), defaults_value);
     }
-
-    reject_dangling_default_model_refs(&config)?;
 
     let agents_value = config
         .get("agents")

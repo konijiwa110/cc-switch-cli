@@ -239,11 +239,9 @@ fn load_providers(state: &AppState, app_type: &AppType) -> Result<ProvidersSnaps
         })
         .collect::<Vec<_>>();
 
-    let rows = if matches!(app_type, AppType::OpenClaw)
-        && crate::openclaw_config::get_openclaw_config_path().exists()
-    {
+    let rows = if matches!(app_type, AppType::OpenClaw) {
         rows.into_iter()
-            .filter(|row| row.is_in_config)
+            .filter(|row| !openclaw_live_providers.contains_key(&row.id) || row.is_in_config)
             .collect::<Vec<_>>()
     } else {
         rows
@@ -1438,7 +1436,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn load_providers_openclaw_hides_saved_only_snapshot_rows_missing_from_live_but_preserves_local_metadata(
+    fn load_providers_openclaw_keeps_saved_only_snapshot_rows_missing_from_live_and_marks_them_out_of_config(
     ) {
         let _guard = lock_test_home_and_settings();
         let temp = tempdir().expect("create tempdir");
@@ -1481,10 +1479,15 @@ mod tests {
         state.save().expect("persist stale snapshot provider");
 
         let snapshot = load_providers(&state, &AppType::OpenClaw).expect("load openclaw rows");
-        assert!(
-            snapshot.rows.iter().all(|row| row.id != "saved-only"),
-            "saved-only OpenClaw rows should stay hidden when the provider no longer exists in openclaw.json"
-        );
+        let row = snapshot
+            .rows
+            .iter()
+            .find(|row| row.id == "saved-only")
+            .expect("saved-only OpenClaw rows should remain visible for re-adding to config");
+        assert!(!row.is_in_config);
+        assert!(row.is_saved);
+        assert_eq!(row.api_url.as_deref(), Some("https://saved.example.com/v1"));
+        assert_eq!(row.primary_model_id.as_deref(), Some("saved-model"));
 
         let providers =
             ProviderService::list(&state, AppType::OpenClaw).expect("list providers after sync");

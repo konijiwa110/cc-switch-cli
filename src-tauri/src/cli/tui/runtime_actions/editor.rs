@@ -1106,7 +1106,7 @@ mod tests {
 
     #[test]
     #[serial(home_settings)]
-    fn submit_provider_edit_hides_saved_only_openclaw_snapshot_rows() {
+    fn submit_provider_edit_keeps_saved_only_openclaw_snapshot_rows_visible() {
         let home_dir = tempdir().expect("create temp home");
         let openclaw_dir = tempdir().expect("create temp openclaw dir");
         let _home = EnvGuard::set_home(home_dir.path());
@@ -1158,10 +1158,13 @@ mod tests {
         state.save().expect("persist saved-only provider snapshot");
 
         let data = UiData::load(&AppType::OpenClaw).expect("load openclaw ui data");
-        assert!(
-            data.providers.rows.iter().all(|row| row.id != "saved-only"),
-            "saved-only snapshot rows should disappear once the OpenClaw manager mirrors live config"
-        );
+        let row = data
+            .providers
+            .rows
+            .iter()
+            .find(|row| row.id == "saved-only")
+            .expect("saved-only snapshot rows should remain visible after OpenClaw reload");
+        assert!(!row.is_in_config);
     }
 
     #[test]

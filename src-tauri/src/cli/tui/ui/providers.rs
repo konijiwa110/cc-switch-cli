@@ -96,8 +96,10 @@ pub(super) fn render_providers(
         let marker = if matches!(app.app_type, crate::app_config::AppType::OpenClaw) {
             if row.is_default_model {
                 "*"
-            } else {
+            } else if row.is_in_config {
                 "+"
+            } else {
+                ""
             }
         } else if row.is_current {
             texts::tui_marker_active()

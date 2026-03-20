@@ -386,10 +386,10 @@ pub(super) fn set_default_model(
 fn openclaw_default_model_references_provider(provider_id: &str) -> Result<bool, AppError> {
     Ok(
         crate::openclaw_config::get_default_model()?.is_some_and(|model| {
-            std::iter::once(model.primary.as_str())
-                .chain(model.fallbacks.iter().map(String::as_str))
-                .filter_map(|model_ref| model_ref.split_once('/'))
-                .any(|(default_provider_id, _)| default_provider_id == provider_id)
+            model
+                .primary
+                .split_once('/')
+                .is_some_and(|(default_provider_id, _)| default_provider_id == provider_id)
         }),
     )
 }
@@ -1536,7 +1536,7 @@ mod tests {
 
     #[test]
     #[serial(home_settings)]
-    fn openclaw_remove_from_config_rejects_fallback_only_provider_even_without_ui_guard() {
+    fn openclaw_remove_from_config_keeps_removed_provider_visible_for_re_add() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = EnvGuard::set_home(temp_home.path());
         let _settings = SettingsGuard::with_openclaw_dir(temp_home.path());
@@ -1566,7 +1566,14 @@ mod tests {
 
         let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
         let mut app = App::new(Some(AppType::OpenClaw));
-        let mut data = UiData::default();
+        let mut data = UiData::load(&AppType::OpenClaw).expect("load initial openclaw ui data");
+        assert!(
+            data.providers
+                .rows
+                .iter()
+                .any(|row| row.id == "p2" && row.is_in_config),
+            "precondition: fallback provider should start visible in config"
+        );
         let mut proxy_loading = RequestTracker::default();
         let mut webdav_loading = RequestTracker::default();
         let mut update_check = RequestTracker::default();
@@ -1587,16 +1594,26 @@ mod tests {
             model_fetch_req_tx: None,
         };
 
-        let err = remove_from_config(&mut ctx, "p2".to_string())
-            .expect_err("fallback-only default reference should not be removable");
-        match err {
-            AppError::Localized { zh, .. } => assert!(zh.contains("默认")),
-            AppError::Config(msg) => assert!(msg.contains("默认")),
-            other => panic!("unexpected error: {other:?}"),
-        }
-        assert!(crate::openclaw_config::get_providers()
-            .expect("read providers after failed remove")
+        remove_from_config(&mut ctx, "p2".to_string())
+            .expect("fallback-only default reference should be removable");
+        assert!(matches!(ctx.app.toast, Some(_)));
+        assert!(!crate::openclaw_config::get_providers()
+            .expect("read providers after successful remove")
             .contains_key("p2"));
+        let default_model = crate::openclaw_config::get_default_model()
+            .expect("read default model after remove")
+            .expect("default model should remain present");
+        assert_eq!(default_model.primary, "p1/primary-model");
+        assert_eq!(default_model.fallbacks, vec!["p2/shared-model".to_string()]);
+        let removed_row = ctx
+            .data
+            .providers
+            .rows
+            .iter()
+            .find(|row| row.id == "p2")
+            .expect("removed provider should remain visible after reload for re-adding");
+        assert!(!removed_row.is_in_config);
+        assert!(removed_row.is_saved);
     }
 
     #[test]

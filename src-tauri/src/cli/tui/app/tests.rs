@@ -679,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn openclaw_providers_s_key_blocks_removing_fallback_only_default_provider() {
+    fn openclaw_providers_s_key_allows_removing_fallback_only_default_provider() {
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::Providers;
         app.focus = Focus::Content;
@@ -703,12 +703,37 @@ mod tests {
         });
 
         let action = app.on_key(key(KeyCode::Char('s')), &data);
+        assert!(matches!(action, Action::ProviderRemoveFromConfig { id } if id == "p2"));
+        assert!(app.toast.is_none());
+    }
+
+    #[test]
+    fn openclaw_providers_s_key_blocks_removing_primary_default_provider() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p1".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({"apiKey":"sk-demo","baseUrl":"https://example.com"}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: true,
+            primary_model_id: Some("primary-model".to_string()),
+            default_model_id: Some("primary-model".to_string()),
+        });
+
+        let action = app.on_key(key(KeyCode::Char('s')), &data);
         assert!(matches!(action, Action::None));
-        assert!(matches!(app.overlay, Overlay::None));
-        assert!(
-            app.toast.is_some(),
-            "fallback-only default references should still block removing from live config"
-        );
+        assert!(app.toast.is_some());
     }
 
     #[test]
@@ -1087,7 +1112,7 @@ mod tests {
     }
 
     #[test]
-    fn openclaw_provider_detail_s_key_blocks_removing_fallback_only_default_provider() {
+    fn openclaw_provider_detail_s_key_allows_removing_fallback_only_default_provider() {
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::ProviderDetail {
             id: "p2".to_string(),
@@ -1113,11 +1138,39 @@ mod tests {
         });
 
         let action = app.on_key(key(KeyCode::Char('s')), &data);
+        assert!(matches!(action, Action::ProviderRemoveFromConfig { id } if id == "p2"));
+        assert!(app.toast.is_none());
+    }
+
+    #[test]
+    fn openclaw_provider_detail_s_key_blocks_removing_primary_default_provider() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ProviderDetail {
+            id: "p1".to_string(),
+        };
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p1".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({"apiKey":"sk-demo","baseUrl":"https://example.com"}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: true,
+            primary_model_id: Some("primary-model".to_string()),
+            default_model_id: Some("primary-model".to_string()),
+        });
+
+        let action = app.on_key(key(KeyCode::Char('s')), &data);
         assert!(matches!(action, Action::None));
-        assert!(
-            app.toast.is_some(),
-            "fallback-only default references should still block removing from detail view"
-        );
+        assert!(app.toast.is_some());
     }
 
     #[test]

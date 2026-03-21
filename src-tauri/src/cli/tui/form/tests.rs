@@ -842,7 +842,31 @@ fn provider_add_form_common_config_json_merges_into_preview_but_not_raw_submit_p
         "provider field should override common snippet value"
     );
     assert_eq!(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-provider");
-    assert_eq!(merged["meta"]["applyCommonConfig"], true);
+    assert_eq!(merged["meta"]["commonConfigEnabled"], true);
+}
+
+#[test]
+fn provider_add_form_removes_legacy_apply_common_config_alias_from_meta() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+    form.id.set("p1");
+    form.name.set("Provider One");
+    form.include_common_config = true;
+    form.extra = json!({
+        "meta": {
+            "applyCommonConfig": false,
+            "endpointAutoSelect": true
+        }
+    });
+
+    let provider = form.to_provider_json_value();
+    let meta = provider["meta"].as_object().expect("meta should be object");
+
+    assert_eq!(meta.get("commonConfigEnabled"), Some(&json!(true)));
+    assert!(
+        !meta.contains_key("applyCommonConfig"),
+        "legacy alias should be removed before serializing the provider"
+    );
+    assert_eq!(meta.get("endpointAutoSelect"), Some(&json!(true)));
 }
 
 #[test]

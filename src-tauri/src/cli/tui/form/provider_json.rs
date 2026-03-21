@@ -34,6 +34,8 @@ impl ProviderAddFormState {
             *meta_value = json!({});
         }
         if let Some(meta_obj) = meta_value.as_object_mut() {
+            // Normalize the legacy alias before inserting the upstream field name.
+            meta_obj.remove("applyCommonConfig");
             meta_obj.insert(
                 "commonConfigEnabled".to_string(),
                 json!(if matches!(self.app_type, AppType::OpenClaw) {

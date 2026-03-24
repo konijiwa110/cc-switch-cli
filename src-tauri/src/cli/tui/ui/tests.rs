@@ -224,26 +224,26 @@ fn settings_proxy_route_hides_edit_key_when_proxy_is_running() {
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+pub(super) fn lock_env() -> std::sync::MutexGuard<'static, ()> {
     match ENV_LOCK.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     }
 }
 
-struct EnvGuard {
+pub(super) struct EnvGuard {
     key: &'static str,
     prev: Option<String>,
 }
 
-struct SettingsEnvGuard {
+pub(super) struct SettingsEnvGuard {
     _lock: TestHomeSettingsLock,
     old_home: Option<OsString>,
     old_userprofile: Option<OsString>,
 }
 
 impl SettingsEnvGuard {
-    fn set_home(home: &Path) -> Self {
+    pub(super) fn set_home(home: &Path) -> Self {
         let lock = lock_test_home_and_settings();
         let old_home = std::env::var_os("HOME");
         let old_userprofile = std::env::var_os("USERPROFILE");
@@ -275,13 +275,13 @@ impl Drop for SettingsEnvGuard {
 }
 
 impl EnvGuard {
-    fn set(key: &'static str, value: &str) -> Self {
+    pub(super) fn set(key: &'static str, value: &str) -> Self {
         let prev = std::env::var(key).ok();
         std::env::set_var(key, value);
         Self { key, prev }
     }
 
-    fn remove(key: &'static str) -> Self {
+    pub(super) fn remove(key: &'static str) -> Self {
         let prev = std::env::var(key).ok();
         std::env::remove_var(key);
         Self { key, prev }
@@ -297,11 +297,11 @@ impl Drop for EnvGuard {
     }
 }
 
-fn render(app: &App, data: &UiData) -> Buffer {
+pub(super) fn render(app: &App, data: &UiData) -> Buffer {
     render_with_size(app, data, 120, 40)
 }
 
-fn render_with_size(app: &App, data: &UiData, width: u16, height: u16) -> Buffer {
+pub(super) fn render_with_size(app: &App, data: &UiData, width: u16, height: u16) -> Buffer {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("terminal created");
     terminal
@@ -310,7 +310,7 @@ fn render_with_size(app: &App, data: &UiData, width: u16, height: u16) -> Buffer
     terminal.backend().buffer().clone()
 }
 
-fn line_at(buf: &Buffer, y: u16) -> String {
+pub(super) fn line_at(buf: &Buffer, y: u16) -> String {
     let mut out = String::new();
     for x in 0..buf.area.width {
         out.push_str(buf[(x, y)].symbol());
@@ -367,7 +367,7 @@ fn nav_title_text(item: NavItem) -> &'static str {
     super::split_nav_label(super::nav_label(item)).1
 }
 
-fn spaces_before_substring(text: &str, needle: &str) -> usize {
+pub(super) fn spaces_before_substring(text: &str, needle: &str) -> usize {
     let idx = text.find(needle).expect("substring should exist");
     text.as_bytes()[..idx]
         .iter()
@@ -376,7 +376,7 @@ fn spaces_before_substring(text: &str, needle: &str) -> usize {
         .count()
 }
 
-fn buffer_cell_text(text: &str) -> String {
+pub(super) fn buffer_cell_text(text: &str) -> String {
     let mut out = String::new();
     for ch in text.chars() {
         out.push(ch);
@@ -449,7 +449,7 @@ fn has_visible_action_button_or_block(text: &str, label: &str) -> bool {
     })
 }
 
-fn visible_tab_labels(header: &str) -> usize {
+pub(super) fn visible_tab_labels(header: &str) -> usize {
     [
         AppType::Claude.as_str(),
         AppType::Codex.as_str(),
@@ -462,7 +462,7 @@ fn visible_tab_labels(header: &str) -> usize {
     .count()
 }
 
-fn minimal_data(_app_type: &AppType) -> UiData {
+pub(super) fn minimal_data(_app_type: &AppType) -> UiData {
     let provider = Provider::with_id(
         "p1".to_string(),
         "Demo Provider".to_string(),
@@ -5343,7 +5343,10 @@ fn openclaw_agents_route_render_groups_model_runtime_and_save_sections() {
         &content,
         &block_title_needle(texts::tui_openclaw_agents_runtime_section()),
     );
-    let default_model = line_index(&content, &buffer_cell_text("missing/current-primary"));
+    let default_model = line_index(
+        &content,
+        &buffer_cell_text("missing/current-primary (供应商未配置)"),
+    );
     let fallbacks = line_index(&content, &buffer_cell_text("目录供应商 / 回退 A"));
     let off_catalog_fallback = line_index(&content, &buffer_cell_text("missing/off-catalog"));
     let add_fallback = line_index(
@@ -6338,8 +6341,14 @@ fn openclaw_agents_route_render_keeps_off_catalog_values_visible_without_raw_jso
     let rendered = render(&app, &data);
     let all = all_text(&rendered);
     let content = content_text(&app, &rendered);
-    let primary_row = line_with(&content, "missing/current-primary");
-    let fallback_row = line_with(&content, "missing/off-catalog");
+    let primary_row = line_with(
+        &content,
+        &buffer_cell_text("missing/current-primary (供应商未配置)"),
+    );
+    let fallback_row = line_with(
+        &content,
+        &buffer_cell_text("missing/off-catalog (供应商未配置)"),
+    );
 
     assert!(
         primary_row.contains(&buffer_cell_text("missing/current-primary (供应商未配置)")),

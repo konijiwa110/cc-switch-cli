@@ -2,6 +2,68 @@ use crate::cli::tui::data;
 
 use super::*;
 
+fn openclaw_header_default_model_value(data: &UiData) -> String {
+    if app::openclaw_agents_has_blocking_warning(data) {
+        return texts::tui_header_config_error().to_string();
+    }
+
+    data.config
+        .openclaw_agents_defaults
+        .as_ref()
+        .and_then(|defaults| defaults.model.as_ref())
+        .and_then(|model| {
+            if model.primary.trim().is_empty() {
+                None
+            } else {
+                Some(model.primary.clone())
+            }
+        })
+        .unwrap_or_else(|| texts::none().to_string())
+}
+
+fn header_status_label(app_type: &AppType) -> &'static str {
+    if matches!(app_type, AppType::OpenClaw) {
+        texts::tui_openclaw_agents_primary_model()
+    } else {
+        strip_trailing_colon(texts::provider_label())
+    }
+}
+
+fn header_status_value(app: &App, data: &UiData) -> String {
+    if matches!(app.app_type, AppType::OpenClaw) {
+        return openclaw_header_default_model_value(data);
+    }
+
+    data.providers
+        .rows
+        .iter()
+        .find(|row| row.is_current)
+        .map(|row| data::provider_display_name(&app.app_type, row))
+        .unwrap_or_else(|| texts::none().to_string())
+}
+
+fn fit_header_status_badge(
+    status_text_full: &str,
+    available_after_title: u16,
+    proxy_badge_width: Option<u16>,
+) -> Option<String> {
+    let full_status_badge = format!("  {status_text_full}  ");
+    let full_status_badge_width = UnicodeWidthStr::width(full_status_badge.as_str()) as u16;
+    let reserved_proxy_width = proxy_badge_width.map(|width| width + 1).unwrap_or(0);
+
+    if reserved_proxy_width + full_status_badge_width <= available_after_title {
+        return Some(full_status_badge);
+    }
+
+    let status_budget = available_after_title.saturating_sub(reserved_proxy_width);
+    if status_budget < 5 {
+        return None;
+    }
+
+    let truncated = truncate_to_display_width(status_text_full, status_budget.saturating_sub(4));
+    Some(format!("  {truncated}  "))
+}
+
 pub(super) fn render_header(
     frame: &mut Frame<'_>,
     app: &App,
@@ -45,61 +107,41 @@ pub(super) fn render_header(
             .collect::<Vec<_>>(),
     );
 
-    let current_provider = data
-        .providers
-        .rows
-        .iter()
-        .find(|p| p.is_current)
-        .map(|row| data::provider_display_name(&app.app_type, row))
-        .unwrap_or_else(|| texts::none().to_string());
-
-    let current_app_routed = data
+    let proxy_badge = data
         .proxy
         .routes_current_app_through_proxy(&app.app_type)
-        .unwrap_or(false);
+        .map(|enabled| {
+            let text = texts::tui_header_proxy_status(enabled);
+            let style = if enabled {
+                selection_style(theme)
+            } else if theme.no_color {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White).bg(theme.surface)
+            };
+            (format!("  {text}  "), style)
+        });
 
-    let proxy_text = texts::tui_header_proxy_status(current_app_routed);
-    let proxy_badge = format!("  {proxy_text}  ");
-    let proxy_badge_width = UnicodeWidthStr::width(proxy_badge.as_str()) as u16;
-    let proxy_style = if current_app_routed {
-        selection_style(theme)
-    } else if theme.no_color {
-        Style::default().add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::White).bg(theme.surface)
-    };
-
-    let provider_text_full = format!(
+    let status_text_full = format!(
         "{}: {}",
-        strip_trailing_colon(texts::provider_label()),
-        current_provider
+        header_status_label(&app.app_type),
+        header_status_value(app, data)
     );
     let available_after_title = area.width.saturating_sub(title_width);
-    let full_provider_badge = format!("  {provider_text_full}  ");
-    let full_provider_badge_width = UnicodeWidthStr::width(full_provider_badge.as_str()) as u16;
-    let full_right_width = proxy_badge_width + 1 + full_provider_badge_width;
-    let provider_badge = if full_right_width <= available_after_title {
-        full_provider_badge
-    } else {
-        let provider_badge_budget =
-            available_after_title.saturating_sub(proxy_badge_width.saturating_add(1));
-        if provider_badge_budget >= 5 {
-            let provider_text = truncate_to_display_width(
-                &provider_text_full,
-                provider_badge_budget.saturating_sub(4),
-            );
-            format!("  {provider_text}  ")
-        } else {
-            String::new()
-        }
+    let proxy_badge_width = proxy_badge
+        .as_ref()
+        .map(|(text, _)| UnicodeWidthStr::width(text.as_str()) as u16);
+    let status_badge =
+        fit_header_status_badge(&status_text_full, available_after_title, proxy_badge_width);
+    let status_badge_width = status_badge
+        .as_ref()
+        .map(|text| UnicodeWidthStr::width(text.as_str()) as u16);
+    let right_width = match (proxy_badge_width, status_badge_width) {
+        (Some(proxy_width), Some(status_width)) => proxy_width + 1 + status_width,
+        (Some(proxy_width), None) => proxy_width,
+        (None, Some(status_width)) => status_width,
+        (None, None) => 0,
     };
-    let provider_badge_width = UnicodeWidthStr::width(provider_badge.as_str()) as u16;
-    let right_width = proxy_badge_width
-        + if provider_badge.is_empty() {
-            0
-        } else {
-            1 + provider_badge_width
-        };
 
     let title_area = Rect::new(area.x, area.y, title_width.min(area.width), area.height);
     let right_x = area
@@ -127,17 +169,19 @@ pub(super) fn render_header(
     );
     frame.render_widget(title, title_area);
 
+    let right_spans = match (proxy_badge, status_badge) {
+        (Some((proxy_text, proxy_style)), Some(status_text)) => vec![
+            Span::styled(proxy_text, proxy_style),
+            Span::raw(" "),
+            Span::styled(status_text, selection_style(theme)),
+        ],
+        (None, Some(status_text)) => vec![Span::styled(status_text, selection_style(theme))],
+        (Some((proxy_text, proxy_style)), None) => vec![Span::styled(proxy_text, proxy_style)],
+        (None, None) => Vec::new(),
+    };
+
     frame.render_widget(
-        Paragraph::new(Line::from(if provider_badge.is_empty() {
-            vec![Span::styled(proxy_badge, proxy_style)]
-        } else {
-            vec![
-                Span::styled(proxy_badge, proxy_style),
-                Span::raw(" "),
-                Span::styled(provider_badge, selection_style(theme)),
-            ]
-        }))
-        .alignment(Alignment::Right),
+        Paragraph::new(Line::from(right_spans)).alignment(Alignment::Right),
         right_area,
     );
 }

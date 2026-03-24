@@ -44,6 +44,9 @@ mod shared;
 mod skills;
 
 #[cfg(test)]
+mod header_tests;
+
+#[cfg(test)]
 mod tests;
 
 use chrome::*;

@@ -711,6 +711,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_header_config_error() -> &'static str {
+        if is_chinese() {
+            "配置错误"
+        } else {
+            "Config Error"
+        }
+    }
+
     pub fn tui_home_section_connection() -> &'static str {
         if is_chinese() {
             "连接信息"

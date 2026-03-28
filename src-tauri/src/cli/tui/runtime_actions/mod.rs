@@ -212,6 +212,7 @@ pub(crate) fn handle_action(
         Action::ProviderImportLiveConfig => providers::import_live_config(&mut ctx),
         Action::ProviderDelete { id } => providers::delete(&mut ctx, id),
         Action::ProviderSpeedtest { url } => providers::speedtest(&mut ctx, url),
+        Action::ProviderLaunchTemporary { .. } => Ok(()),
         Action::ProviderStreamCheck { id } => providers::stream_check(&mut ctx, id),
         Action::ProviderModelFetch {
             base_url,

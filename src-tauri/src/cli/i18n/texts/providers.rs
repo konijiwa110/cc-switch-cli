@@ -514,6 +514,14 @@ pub fn tui_key_stream_check() -> &'static str {
     }
 }
 
+pub fn tui_key_launch_temp() -> &'static str {
+    if is_chinese() {
+        "临时启动"
+    } else {
+        "launch temp"
+    }
+}
+
 pub fn tui_stream_check_status_operational() -> &'static str {
     if is_chinese() {
         "正常"

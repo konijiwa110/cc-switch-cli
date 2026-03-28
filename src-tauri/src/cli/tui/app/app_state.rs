@@ -70,6 +70,9 @@ pub enum Action {
     ProviderSpeedtest {
         url: String,
     },
+    ProviderLaunchTemporary {
+        id: String,
+    },
     ProviderStreamCheck {
         id: String,
     },

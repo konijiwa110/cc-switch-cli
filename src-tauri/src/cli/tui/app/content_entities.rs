@@ -113,6 +113,15 @@ impl App {
                 self.overlay = Overlay::SpeedtestRunning { url: url.clone() };
                 Action::ProviderSpeedtest { url }
             }
+            KeyCode::Char('o') => {
+                let Some(row) = visible.get(self.provider_idx) else {
+                    return Action::None;
+                };
+                if !matches!(self.app_type, AppType::Claude) {
+                    return Action::None;
+                }
+                Action::ProviderLaunchTemporary { id: row.id.clone() }
+            }
             KeyCode::Char('c') => {
                 if !supports_provider_stream_check(&self.app_type) {
                     return Action::None;
@@ -197,6 +206,12 @@ impl App {
                 };
                 self.overlay = Overlay::SpeedtestRunning { url: url.clone() };
                 Action::ProviderSpeedtest { url }
+            }
+            KeyCode::Char('o') => {
+                if !matches!(self.app_type, AppType::Claude) {
+                    return Action::None;
+                }
+                Action::ProviderLaunchTemporary { id: row.id.clone() }
             }
             KeyCode::Char('c') => {
                 if !supports_provider_stream_check(&self.app_type) {
@@ -350,5 +365,81 @@ impl App {
             }
             _ => Action::None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn provider_row(id: &str) -> super::data::ProviderRow {
+        super::data::ProviderRow {
+            id: id.to_string(),
+            provider: crate::provider::Provider::with_id(
+                id.to_string(),
+                "Provider One".to_string(),
+                json!({"env":{"ANTHROPIC_BASE_URL":"https://example.com"}}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: None,
+            default_model_id: None,
+        }
+    }
+
+    #[test]
+    fn claude_provider_list_o_key_requests_temporary_launch() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(provider_row("p1"));
+
+        let action = app.on_key(key(KeyCode::Char('o')), &data);
+        assert!(matches!(
+            action,
+            Action::ProviderLaunchTemporary { id } if id == "p1"
+        ));
+    }
+
+    #[test]
+    fn claude_provider_detail_o_key_requests_temporary_launch() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::ProviderDetail {
+            id: "p1".to_string(),
+        };
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(provider_row("p1"));
+
+        let action = app.on_key(key(KeyCode::Char('o')), &data);
+        assert!(matches!(
+            action,
+            Action::ProviderLaunchTemporary { id } if id == "p1"
+        ));
+    }
+
+    #[test]
+    fn non_claude_provider_o_key_is_noop() {
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(provider_row("p1"));
+
+        let action = app.on_key(key(KeyCode::Char('o')), &data);
+        assert!(matches!(action, Action::None));
     }
 }

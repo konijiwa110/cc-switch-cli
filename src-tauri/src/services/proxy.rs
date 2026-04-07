@@ -242,21 +242,12 @@ impl ProxyService {
                 ));
             }
 
-            if let Some(session) = self
-                .load_persisted_runtime_session()
-                .filter(|session| session.pid == child_pid)
-                .filter(|session| session.kind.is_managed_external())
-                .filter(|session| session.session_token.as_deref() == Some(session_token.as_str()))
+            if let Some(info) = self
+                .managed_session_ready_info(child_pid, session_token.as_str())
+                .await
             {
-                if Self::load_external_proxy_status(&session).await.is_some() {
-                    let info = ProxyServerInfo {
-                        address: session.address,
-                        port: session.port,
-                        started_at: session.started_at,
-                    };
-                    Self::spawn_managed_child_reaper(child);
-                    return Ok(info);
-                }
+                Self::spawn_managed_child_reaper(child);
+                return Ok(info);
             }
 
             if tokio::time::Instant::now() >= start_deadline {
@@ -1623,12 +1614,29 @@ impl ProxyService {
         false
     }
 
-    async fn load_external_proxy_status(
-        session: &PersistedProxyRuntimeSession,
-    ) -> Option<ProxyStatus> {
-        match Self::probe_external_proxy_status(session).await {
-            ExternalProxyStatusProbe::Matched(status) => Some(status),
-            ExternalProxyStatusProbe::Mismatched | ExternalProxyStatusProbe::Unreachable => None,
+    async fn managed_session_ready_info(
+        &self,
+        child_pid: u32,
+        session_token: &str,
+    ) -> Option<ProxyServerInfo> {
+        let session = self
+            .load_persisted_runtime_session()
+            .filter(|session| session.pid == child_pid)
+            .filter(|session| session.kind.is_managed_external())
+            .filter(|session| session.session_token.as_deref() == Some(session_token))?;
+
+        match Self::probe_external_proxy_status(&session).await {
+            ExternalProxyStatusProbe::Matched(status) => Some(ProxyServerInfo {
+                address: status.address,
+                port: status.port,
+                started_at: session.started_at,
+            }),
+            ExternalProxyStatusProbe::Unreachable => Some(ProxyServerInfo {
+                address: session.address,
+                port: session.port,
+                started_at: session.started_at,
+            }),
+            ExternalProxyStatusProbe::Mismatched => None,
         }
     }
 
@@ -1782,14 +1790,6 @@ impl ProxyService {
         }
 
         Ok(current_exe)
-    }
-
-    fn proxy_server_info_from_status(&self, status: ProxyStatus) -> ProxyServerInfo {
-        ProxyServerInfo {
-            address: status.address,
-            port: status.port,
-            started_at: chrono::Utc::now().to_rfc3339(),
-        }
     }
 
     async fn sync_persisted_global_proxy_enabled(&self, enabled: bool) -> Result<(), String> {
@@ -2427,6 +2427,172 @@ base_url = "https://api.openai.com/v1"
         );
 
         service.stop().await.expect("stop proxy runtime");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn managed_session_ready_info_accepts_persisted_session_without_status_probe() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+
+        db.set_setting(
+            PROXY_RUNTIME_SESSION_KEY,
+            &serde_json::to_string(&PersistedProxyRuntimeSession {
+                pid: 4242,
+                address: "127.0.0.1".to_string(),
+                port: 15721,
+                started_at: "2026-03-10T00:00:00Z".to_string(),
+                kind: PersistedProxyRuntimeSessionKind::ManagedExternal,
+                session_token: Some("expected-session-token".to_string()),
+            })
+            .expect("serialize runtime session"),
+        )
+        .expect("persist runtime session");
+
+        let info = service
+            .managed_session_ready_info(4242, "expected-session-token")
+            .await
+            .expect("persisted managed runtime marker should be treated as ready");
+
+        assert_eq!(info.address, "127.0.0.1");
+        assert_eq!(info.port, 15721);
+        assert_eq!(info.started_at, "2026-03-10T00:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn managed_session_ready_info_prefers_matching_status_snapshot_when_available() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind fake proxy status listener");
+        let port = listener
+            .local_addr()
+            .expect("read fake proxy listener addr")
+            .port();
+        let status = serde_json::json!({
+            "running": true,
+            "address": "127.0.0.1",
+            "port": port,
+            "active_connections": 0,
+            "total_requests": 0,
+            "success_requests": 0,
+            "failed_requests": 0,
+            "success_rate": 0.0,
+            "uptime_seconds": 12,
+            "current_provider": null,
+            "current_provider_id": null,
+            "last_request_at": null,
+            "last_error": null,
+            "failover_count": 0,
+            "managed_session_token": "expected-session-token"
+        });
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept status request");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                status.to_string().len(),
+                status
+            );
+            use tokio::io::AsyncWriteExt;
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write fake status response");
+        });
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        db.set_setting(
+            PROXY_RUNTIME_SESSION_KEY,
+            &serde_json::to_string(&PersistedProxyRuntimeSession {
+                pid: 4242,
+                address: "127.0.0.1".to_string(),
+                port,
+                started_at: "2026-03-10T00:00:00Z".to_string(),
+                kind: PersistedProxyRuntimeSessionKind::ManagedExternal,
+                session_token: Some("expected-session-token".to_string()),
+            })
+            .expect("serialize runtime session"),
+        )
+        .expect("persist runtime session");
+
+        let info = service
+            .managed_session_ready_info(4242, "expected-session-token")
+            .await
+            .expect("matching external status should make the session ready");
+
+        assert_eq!(info.address, "127.0.0.1");
+        assert_eq!(info.port, port);
+
+        server.await.expect("fake status server should finish");
+    }
+
+    #[tokio::test]
+    async fn managed_session_ready_info_rejects_mismatched_status_snapshot() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind fake proxy status listener");
+        let port = listener
+            .local_addr()
+            .expect("read fake proxy listener addr")
+            .port();
+        let status = serde_json::json!({
+            "running": true,
+            "address": "127.0.0.1",
+            "port": port,
+            "active_connections": 0,
+            "total_requests": 0,
+            "success_requests": 0,
+            "failed_requests": 0,
+            "success_rate": 0.0,
+            "uptime_seconds": 12,
+            "current_provider": null,
+            "current_provider_id": null,
+            "last_request_at": null,
+            "last_error": null,
+            "failover_count": 0,
+            "managed_session_token": "other-session-token"
+        });
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept status request");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                status.to_string().len(),
+                status
+            );
+            use tokio::io::AsyncWriteExt;
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write fake status response");
+        });
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        db.set_setting(
+            PROXY_RUNTIME_SESSION_KEY,
+            &serde_json::to_string(&PersistedProxyRuntimeSession {
+                pid: 4242,
+                address: "127.0.0.1".to_string(),
+                port,
+                started_at: "2026-03-10T00:00:00Z".to_string(),
+                kind: PersistedProxyRuntimeSessionKind::ManagedExternal,
+                session_token: Some("expected-session-token".to_string()),
+            })
+            .expect("serialize runtime session"),
+        )
+        .expect("persist runtime session");
+
+        assert!(
+            service
+                .managed_session_ready_info(4242, "expected-session-token")
+                .await
+                .is_none(),
+            "startup should keep waiting when /status reports a different managed session token"
+        );
+
+        server.await.expect("fake status server should finish");
     }
 
     #[tokio::test]

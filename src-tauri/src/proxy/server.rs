@@ -555,6 +555,14 @@ impl ProxyServer {
         })
     }
 
+    pub async fn set_active_target(&self, app_type: &str, provider_id: &str, provider_name: &str) {
+        let mut current_providers = self.state.current_providers.write().await;
+        current_providers.insert(
+            app_type.to_string(),
+            (provider_id.to_string(), provider_name.to_string()),
+        );
+    }
+
     pub async fn stop(&self) -> Result<(), String> {
         if let Some(tx) = self.shutdown_tx.write().await.take() {
             let _ = tx.send(());

@@ -188,6 +188,7 @@ impl ProviderRouter {
     }
 
     fn current_provider_id(&self, app_type: &AppType) -> Option<String> {
+        let _ = crate::settings::reload_settings();
         crate::settings::get_effective_current_provider(&self.db, app_type)
             .ok()
             .flatten()

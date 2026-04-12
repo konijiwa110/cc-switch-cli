@@ -320,7 +320,8 @@ fn switch_codex_writes_auth_json_when_live_auth_file_is_missing() {
         get_codex_auth_path().exists(),
         "auth.json should be created from provider auth"
     );
-    let live_auth: Value = crate::config::read_json_file(&get_codex_auth_path()).expect("read auth");
+    let live_auth: Value =
+        crate::config::read_json_file(&get_codex_auth_path()).expect("read auth");
     assert_eq!(live_auth["OPENAI_API_KEY"], json!("sk-keyring"));
 
     let live_config_text =
@@ -489,6 +490,95 @@ fn codex_switch_preserves_base_url_and_wire_api_across_multiple_switches() {
         cfg.contains("wire_api = \"responses\""),
         "provider snapshot should retain wire_api across switches"
     );
+}
+
+#[tokio::test]
+#[serial]
+async fn switch_updates_running_proxy_takeover_target_without_restart() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = EnvGuard::set_home(temp_home.path());
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::Claude);
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "p1".to_string();
+        manager.providers.insert(
+            "p1".to_string(),
+            Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token-one",
+                        "ANTHROPIC_BASE_URL": "https://api.one.example"
+                    }
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Provider Two".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_AUTH_TOKEN": "token-two",
+                        "ANTHROPIC_BASE_URL": "https://api.two.example"
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(config);
+    state.save().expect("persist config snapshot to db");
+
+    state
+        .proxy_service
+        .set_takeover_for_app("claude", true)
+        .await
+        .expect("enable claude takeover");
+
+    ProviderService::switch(&state, AppType::Claude, "p2").expect("switch should hot-switch");
+
+    let status = state.proxy_service.get_status().await;
+    assert_eq!(
+        status
+            .active_targets
+            .iter()
+            .find(|target| target.app_type == "claude")
+            .map(|target| target.provider_id.as_str()),
+        Some("p2"),
+        "switching providers while takeover is active should update the running proxy target immediately"
+    );
+
+    let backup = state
+        .db
+        .get_live_backup("claude")
+        .await
+        .expect("get live backup")
+        .expect("backup should exist");
+    let stored: Value = serde_json::from_str(&backup.original_config).expect("parse backup");
+    assert_eq!(
+        stored
+            .get("env")
+            .and_then(Value::as_object)
+            .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
+            .and_then(Value::as_str),
+        Some("https://api.two.example"),
+        "hot-switch should also refresh the restore backup to the newly selected provider"
+    );
+
+    state
+        .proxy_service
+        .stop()
+        .await
+        .expect("stop proxy runtime");
 }
 
 #[test]

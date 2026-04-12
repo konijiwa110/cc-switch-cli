@@ -1509,24 +1509,48 @@ impl ProviderService {
 
     /// 切换指定应用的供应商
     pub fn switch(state: &AppState, app_type: AppType, provider_id: &str) -> Result<(), AppError> {
-        let app_type_clone = app_type.clone();
-        let provider_id_owned = provider_id.to_string();
-        let takeover_active = if app_type.is_additive_mode() {
-            false
-        } else {
-            let is_running = state
+        if !app_type.is_additive_mode() {
+            let providers = state.db.get_all_providers(app_type.as_str())?;
+            providers.get(provider_id).ok_or_else(|| {
+                AppError::localized(
+                    "provider.not_found",
+                    format!("供应商不存在: {provider_id}"),
+                    format!("Provider not found: {provider_id}"),
+                )
+            })?;
+
+            let is_app_taken_over =
+                futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
+                    .ok()
+                    .flatten()
+                    .is_some();
+            let is_proxy_running = state
                 .proxy_service
                 .is_running_blocking()
                 .map_err(AppError::Message)?;
-            if !is_running {
-                false
-            } else {
-                state
-                    .proxy_service
-                    .is_app_takeover_active_blocking(&app_type)
-                    .map_err(AppError::Message)?
+            let live_taken_over = state
+                .proxy_service
+                .detect_takeover_in_live_config_for_app(&app_type);
+            let should_hot_switch = (is_app_taken_over || live_taken_over) && is_proxy_running;
+
+            if should_hot_switch {
+                futures::executor::block_on(
+                    state
+                        .proxy_service
+                        .hot_switch_provider(app_type.as_str(), provider_id),
+                )
+                .map_err(|e| AppError::Message(format!("热切换失败: {e}")))?;
+
+                let mut guard = state.config.write().map_err(AppError::from)?;
+                if let Some(manager) = guard.get_manager_mut(&app_type) {
+                    manager.current = provider_id.to_string();
+                }
+                return Ok(());
             }
-        };
+        }
+
+        let app_type_clone = app_type.clone();
+        let provider_id_owned = provider_id.to_string();
 
         Self::run_transaction(state, move |config| {
             if app_type_clone.is_additive_mode() {
@@ -1555,41 +1579,6 @@ impl ProviderService {
                         .get(&app_type_clone)
                         .cloned(),
                     takeover_active: false,
-                };
-
-                return Ok(((), Some(action)));
-            }
-
-            if takeover_active {
-                let provider = config
-                    .get_manager(&app_type_clone)
-                    .ok_or_else(|| Self::app_not_found(&app_type_clone))?
-                    .providers
-                    .get(&provider_id_owned)
-                    .cloned()
-                    .ok_or_else(|| {
-                        AppError::localized(
-                            "provider.not_found",
-                            format!("供应商不存在: {provider_id_owned}"),
-                            format!("Provider not found: {provider_id_owned}"),
-                        )
-                    })?;
-
-                if let Some(manager) = config.get_manager_mut(&app_type_clone) {
-                    manager.current = provider_id_owned.clone();
-                }
-
-                let action = PostCommitAction {
-                    app_type: app_type_clone.clone(),
-                    provider,
-                    backup: Self::capture_live_snapshot(&app_type_clone)?,
-                    sync_mcp: false,
-                    refresh_snapshot: false,
-                    common_config_snippet: config
-                        .common_config_snippets
-                        .get(&app_type_clone)
-                        .cloned(),
-                    takeover_active: true,
                 };
 
                 return Ok(((), Some(action)));

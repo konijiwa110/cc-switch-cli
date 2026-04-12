@@ -35,6 +35,7 @@ impl HandlerContext {
         headers: &HeaderMap,
         body: &Value,
     ) -> Result<Self, ProxyError> {
+        let _ = crate::settings::reload_settings();
         let current_provider_id_at_start =
             crate::settings::get_effective_current_provider(&state.db, &app_type)
                 .ok()

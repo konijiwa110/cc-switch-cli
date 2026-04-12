@@ -496,6 +496,13 @@ fn settings_store() -> &'static RwLock<AppSettings> {
     STORE.get_or_init(|| RwLock::new(AppSettings::load()))
 }
 
+pub fn reload_settings() -> Result<(), AppError> {
+    let fresh_settings = AppSettings::load();
+    let mut guard = settings_store().write().expect("写入设置锁失败");
+    *guard = fresh_settings;
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) fn reload_test_settings() {
     let mut guard = settings_store().write().expect("写入设置锁失败");

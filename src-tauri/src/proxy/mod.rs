@@ -14,6 +14,7 @@ pub mod response;
 pub mod response_handler;
 pub mod server;
 pub mod session;
+pub mod switch_lock;
 pub mod thinking_budget_rectifier;
 pub mod thinking_optimizer;
 pub mod thinking_rectifier;

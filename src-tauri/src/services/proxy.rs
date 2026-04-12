@@ -25,6 +25,7 @@ use crate::{
     },
     provider::Provider,
     proxy::{
+        switch_lock::SwitchLockManager,
         types::{GlobalProxyConfig, ProxyTakeoverStatus},
         ProxyConfig, ProxyServer, ProxyServerInfo, ProxyStatus,
     },
@@ -49,10 +50,16 @@ const CLAUDE_MODEL_OVERRIDE_ENV_KEYS: [&str; 6] = [
 pub struct ProxyService {
     db: Arc<Database>,
     runtime: Arc<ProxyRuntimeState>,
+    switch_locks: SwitchLockManager,
 }
 
 struct ProxyRuntimeState {
     server: RwLock<Option<ProxyServer>>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HotSwitchOutcome {
+    pub logical_target_changed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,7 +162,11 @@ impl ProxyService {
 
     pub fn new(db: Arc<Database>) -> Self {
         let runtime = Self::shared_runtime_state(db.runtime_key());
-        Self { db, runtime }
+        Self {
+            db,
+            runtime,
+            switch_locks: SwitchLockManager::new(),
+        }
     }
 
     fn shared_runtime_state(runtime_key: &str) -> Arc<ProxyRuntimeState> {
@@ -698,6 +709,73 @@ impl ProxyService {
 
         self.save_live_backup_snapshot(app_type.as_str(), &backup_snapshot)
             .await
+    }
+
+    pub async fn hot_switch_provider(
+        &self,
+        app_type: &str,
+        provider_id: &str,
+    ) -> Result<HotSwitchOutcome, String> {
+        let _guard = self.switch_locks.lock_for_app(app_type).await;
+
+        let app_type_enum = Self::takeover_app_from_str(app_type)?;
+        let provider = self
+            .db
+            .get_provider_by_id(provider_id, app_type)
+            .map_err(|e| format!("读取供应商失败: {e}"))?
+            .ok_or_else(|| format!("供应商不存在: {provider_id}"))?;
+
+        let logical_target_changed =
+            crate::settings::get_effective_current_provider(&self.db, &app_type_enum)
+                .map_err(|e| format!("读取当前供应商失败: {e}"))?
+                .as_deref()
+                != Some(provider_id);
+
+        let has_backup = self
+            .db
+            .get_live_backup(app_type_enum.as_str())
+            .await
+            .map_err(|e| format!("读取 {app_type} 备份失败: {e}"))?
+            .is_some();
+        let live_taken_over = self.detect_takeover_in_live_config_for_app(&app_type_enum);
+        let should_sync_backup = has_backup || live_taken_over;
+
+        self.db
+            .set_current_provider(app_type_enum.as_str(), provider_id)
+            .map_err(|e| format!("更新当前供应商失败: {e}"))?;
+        crate::settings::set_current_provider(&app_type_enum, Some(provider_id))
+            .map_err(|e| format!("更新本地当前供应商失败: {e}"))?;
+
+        if should_sync_backup {
+            self.update_live_backup_from_provider(app_type, &provider)
+                .await?;
+        }
+
+        if let Some(server) = self.runtime.server.read().await.as_ref() {
+            server
+                .set_active_target(app_type_enum.as_str(), &provider.id, &provider.name)
+                .await;
+        }
+
+        Ok(HotSwitchOutcome {
+            logical_target_changed,
+        })
+    }
+
+    pub async fn switch_proxy_target(
+        &self,
+        app_type: &str,
+        provider_id: &str,
+    ) -> Result<(), String> {
+        let outcome = self.hot_switch_provider(app_type, provider_id).await?;
+
+        if outcome.logical_target_changed {
+            log::info!("代理模式：已切换 {app_type} 的目标供应商为 {provider_id}");
+        } else {
+            log::debug!("代理模式：{app_type} 已对齐到目标供应商 {provider_id}");
+        }
+
+        Ok(())
     }
 
     fn preserve_codex_mcp_servers_in_backup(
@@ -2918,6 +2996,65 @@ base_url = "https://new.example/v1"
             Some(false),
             "common config should be applied into Claude restore backup even before takeover is active"
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn switch_proxy_target_updates_live_backup_when_taken_over() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+
+        let provider_a = Provider::with_id(
+            "a".to_string(),
+            "A".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_API_KEY": "a-key"
+                }
+            }),
+            None,
+        );
+        let provider_b = Provider::with_id(
+            "b".to_string(),
+            "B".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_API_KEY": "b-key"
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider_a)
+            .expect("save provider a");
+        db.save_provider("claude", &provider_b)
+            .expect("save provider b");
+        db.set_current_provider("claude", "a")
+            .expect("set current provider");
+
+        db.save_live_backup("claude", "{\"env\":{}}")
+            .await
+            .expect("seed live backup");
+
+        service
+            .switch_proxy_target("claude", "b")
+            .await
+            .expect("switch proxy target");
+
+        assert_eq!(
+            crate::settings::get_current_provider(&AppType::Claude).as_deref(),
+            Some("b")
+        );
+
+        let backup = db
+            .get_live_backup("claude")
+            .await
+            .expect("get live backup")
+            .expect("backup exists");
+        let expected = serde_json::to_string(&provider_b.settings_config).expect("serialize");
+        assert_eq!(backup.original_config, expected);
     }
 
     #[tokio::test]

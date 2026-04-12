@@ -101,6 +101,35 @@ async fn test_failover_disabled_prefers_effective_current_provider_from_settings
 
 #[tokio::test]
 #[serial]
+async fn test_failover_disabled_reloads_settings_for_long_lived_router() {
+    let _home = TempHome::new();
+    let db = Arc::new(Database::memory().unwrap());
+
+    let provider_a = Provider::with_id("a".to_string(), "Provider A".to_string(), json!({}), None);
+    let provider_b = Provider::with_id("b".to_string(), "Provider B".to_string(), json!({}), None);
+
+    db.save_provider("claude", &provider_a).unwrap();
+    db.save_provider("claude", &provider_b).unwrap();
+    db.set_current_provider("claude", "a").unwrap();
+    crate::settings::set_current_provider(&crate::app_config::AppType::Claude, Some("a")).unwrap();
+
+    let router = ProviderRouter::new(db.clone());
+    let first = router.select_providers("claude").await.unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].id, "a");
+
+    crate::settings::set_current_provider(&crate::app_config::AppType::Claude, Some("b")).unwrap();
+
+    let second = router.select_providers("claude").await.unwrap();
+    assert_eq!(second.len(), 1);
+    assert_eq!(
+        second[0].id, "b",
+        "a long-lived proxy router should observe current provider changes without requiring a process restart"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn test_failover_enabled_uses_queue_order_ignoring_current() {
     let _home = TempHome::new();
     let db = Arc::new(Database::memory().unwrap());

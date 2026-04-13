@@ -11,7 +11,9 @@ use cc_switch_lib::{
 
 #[path = "support.rs"]
 mod support;
-use support::{ensure_test_home, lock_test_mutex, reset_test_fs, state_from_config};
+use support::{
+    ensure_test_home, lock_test_mutex, reset_test_fs, state_from_config, CurrentDirGuard,
+};
 
 fn find_free_port() -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind free local port");
@@ -19,6 +21,174 @@ fn find_free_port() -> u16 {
         .local_addr()
         .expect("read local listener address")
         .port()
+}
+
+#[test]
+#[serial]
+fn provider_export_writes_merged_claude_settings_to_default_path() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+    let project_dir = home.join("project-a");
+    let _cwd_guard = CurrentDirGuard::change_to(&project_dir);
+
+    let mut config = MultiAppConfig::default();
+    config.common_config_snippets.claude = Some(
+        r#"{
+  "env": {
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1
+  },
+  "includeCoAuthoredBy": false
+}"#
+        .to_string(),
+    );
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "demo".to_string();
+        manager.providers.insert(
+            "demo".to_string(),
+            Provider::with_id(
+                "demo".to_string(),
+                "demo".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_API_KEY": "sk-demo"
+                    },
+                    "permissions": {
+                        "allow": ["Bash"]
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(config);
+    state.save().expect("persist test config");
+
+    cc_switch_lib::cli::commands::provider::execute(
+        cc_switch_lib::cli::commands::provider::ProviderCommand::Export {
+            id: "demo".to_string(),
+            output: None,
+        },
+        Some(AppType::Claude),
+    )
+    .expect("export command should succeed");
+
+    let export_path = project_dir.join(".claude").join("settings.local.json");
+    let exported: serde_json::Value = read_json_file(&export_path).expect("read exported file");
+
+    assert_eq!(
+        exported
+            .get("env")
+            .and_then(|v| v.get("ANTHROPIC_API_KEY"))
+            .and_then(|v| v.as_str()),
+        Some("sk-demo"),
+        "provider env should be preserved"
+    );
+    assert_eq!(
+        exported
+            .get("env")
+            .and_then(|v| v.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
+            .and_then(|v| v.as_i64()),
+        Some(1),
+        "common config snippet should be merged into export"
+    );
+    assert_eq!(
+        exported
+            .get("includeCoAuthoredBy")
+            .and_then(|v| v.as_bool()),
+        Some(false),
+        "top-level common config should be present in export"
+    );
+    assert_eq!(
+        exported
+            .get("permissions")
+            .and_then(|v| v.get("allow"))
+            .and_then(|v| v.as_array())
+            .map(|values| values.len()),
+        Some(1),
+        "provider-specific settings should remain in export"
+    );
+}
+
+#[test]
+#[serial]
+fn provider_export_respects_apply_common_config_flag_and_custom_output() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    config.common_config_snippets.claude =
+        Some(r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1}}"#.to_string());
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "demo".to_string();
+        let mut provider = Provider::with_id(
+            "demo".to_string(),
+            "demo".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_API_KEY": "sk-demo"
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(cc_switch_lib::ProviderMeta {
+            apply_common_config: Some(false),
+            ..Default::default()
+        });
+        manager.providers.insert("demo".to_string(), provider);
+    }
+
+    let state = state_from_config(config);
+    state.save().expect("persist test config");
+
+    let output_path = home.join("exports").join("custom-settings.json");
+    cc_switch_lib::cli::commands::provider::execute(
+        cc_switch_lib::cli::commands::provider::ProviderCommand::Export {
+            id: "demo".to_string(),
+            output: Some(output_path.clone()),
+        },
+        Some(AppType::Claude),
+    )
+    .expect("export command should succeed");
+
+    let exported: serde_json::Value = read_json_file(&output_path).expect("read exported file");
+    assert!(
+        exported
+            .get("env")
+            .and_then(|v| v.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
+            .is_none(),
+        "common config should be skipped when applyCommonConfig=false"
+    );
+}
+
+#[test]
+#[serial]
+fn provider_export_rejects_non_claude_apps() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let err = cc_switch_lib::cli::commands::provider::execute(
+        cc_switch_lib::cli::commands::provider::ProviderCommand::Export {
+            id: "demo".to_string(),
+            output: None,
+        },
+        Some(AppType::Codex),
+    )
+    .expect_err("non-claude export should fail");
+
+    assert!(
+        err.to_string().contains("supports only Claude"),
+        "error should explain Claude-only support"
+    );
 }
 
 #[test]

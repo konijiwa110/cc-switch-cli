@@ -2,6 +2,12 @@
 
 ## 2026-04-22
 
+### 本机优先的 GitHub 编译分发脚本
+
+- 新增 `scripts/distribute_release.sh`，把“先装本机，再装 100.64.0.13、100.64.0.2:2323、100.64.0.10”的固定顺序收进一个本地脚本。
+- 脚本会把当前提交推到配置好的 GitHub 构建仓库，触发 `release.yml`，等待 `linux-x64-musl` 与 `linux-arm64-musl` 产物完成后再下载分发。
+- 新增 `.env.example` 记录本机私有配置项，真实 `.env` 继续只保存在本机且不提交到 git。
+
 ### 更新源切换到 `zekza/cc-switch-cli`
 
 - 将编译元数据中的仓库地址改为 `https://github.com/zekza/cc-switch-cli`，让 `cc-switch update` 默认从这个 GitHub 仓库读取 release。

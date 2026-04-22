@@ -62,6 +62,19 @@ pub struct HotSwitchOutcome {
     pub logical_target_changed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProxyRestartMode {
+    InProcess,
+    ManagedExternal,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProxyRestartPlan {
+    pub(crate) config: ProxyConfig,
+    pub(crate) takeovers: Vec<AppType>,
+    pub(crate) mode: ProxyRestartMode,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum PersistedProxyRuntimeSessionKind {
@@ -204,13 +217,122 @@ impl ProxyService {
         self.start_managed_session_unlocked(app_type).await
     }
 
+    pub(crate) async fn start_managed_runtime_with_takeovers(
+        &self,
+        takeovers: &[AppType],
+    ) -> Result<ProxyServerInfo, String> {
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
+        self.start_managed_runtime_with_takeovers_unlocked(takeovers)
+            .await
+    }
+
+    pub(crate) async fn stop_runtime_for_restart(&self) -> Result<bool, String> {
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
+        self.stop_runtime_for_restart_unlocked().await
+    }
+
+    pub(crate) async fn clear_takeovers_for_restart(
+        &self,
+        takeovers: &[AppType],
+    ) -> Result<(), String> {
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
+        for app_type in takeovers {
+            self.disable_takeover_for_app_unlocked(app_type, false)
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn capture_restart_plan(&self) -> Result<Option<ProxyRestartPlan>, String> {
+        let status = self.get_status().await;
+        if !status.running {
+            return Ok(None);
+        }
+
+        let mut config = self.get_config().await.map_err(|e| e.to_string())?;
+        if !status.address.trim().is_empty() {
+            config.listen_address = status.address.clone();
+        }
+        if status.port != 0 {
+            config.listen_port = status.port;
+        }
+
+        let mut takeovers = Vec::new();
+        for app_type in [AppType::Claude, AppType::Codex, AppType::Gemini] {
+            if self.is_app_takeover_active(&app_type).await? {
+                takeovers.push(app_type);
+            }
+        }
+        let mode = if self.runtime.server.read().await.is_some() {
+            ProxyRestartMode::InProcess
+        } else {
+            ProxyRestartMode::ManagedExternal
+        };
+
+        Ok(Some(ProxyRestartPlan {
+            config,
+            takeovers,
+            mode,
+        }))
+    }
+
+    pub(crate) async fn restart_from_plan(
+        &self,
+        plan: &ProxyRestartPlan,
+    ) -> Result<ProxyServerInfo, String> {
+        match plan.mode {
+            ProxyRestartMode::InProcess => {
+                let server_info = self.start_with_runtime_config(plan.config.clone()).await?;
+                for app_type in &plan.takeovers {
+                    self.set_takeover_for_app(app_type.as_str(), true).await?;
+                }
+                Ok(server_info)
+            }
+            ProxyRestartMode::ManagedExternal => {
+                self.start_managed_runtime_with_config_and_takeovers(
+                    plan.config.clone(),
+                    &plan.takeovers,
+                )
+                .await
+            }
+        }
+    }
+
     async fn start_managed_session_unlocked(
         &self,
         app_type: &str,
     ) -> Result<ProxyServerInfo, String> {
+        let app_type = Self::takeover_app_from_str(app_type)?;
+        self.start_managed_runtime_with_takeovers_unlocked(&[app_type])
+            .await
+    }
+
+    async fn start_managed_runtime_with_takeovers_unlocked(
+        &self,
+        takeovers: &[AppType],
+    ) -> Result<ProxyServerInfo, String> {
+        let config = self.get_config().await.map_err(|e| e.to_string())?;
+        self.start_managed_runtime_with_config_and_takeovers_unlocked(config, takeovers)
+            .await
+    }
+
+    pub(crate) async fn start_managed_runtime_with_config_and_takeovers(
+        &self,
+        config: ProxyConfig,
+        takeovers: &[AppType],
+    ) -> Result<ProxyServerInfo, String> {
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
+        self.start_managed_runtime_with_config_and_takeovers_unlocked(config, takeovers)
+            .await
+    }
+
+    async fn start_managed_runtime_with_config_and_takeovers_unlocked(
+        &self,
+        config: ProxyConfig,
+        takeovers: &[AppType],
+    ) -> Result<ProxyServerInfo, String> {
         Self::ensure_managed_sessions_supported()?;
 
-        let app_type = Self::takeover_app_from_str(app_type)?;
         let current_status = self.get_status().await;
         if current_status.running {
             return Err(
@@ -225,8 +347,14 @@ impl ProxyService {
         child
             .arg("proxy")
             .arg("serve")
-            .arg("--takeover")
-            .arg(app_type.as_str())
+            .arg("--listen-address")
+            .arg(config.listen_address.as_str())
+            .arg("--listen-port")
+            .arg(config.listen_port.to_string());
+        for app_type in takeovers {
+            child.arg("--takeover").arg(app_type.as_str());
+        }
+        child
             .env(
                 PROXY_RUNTIME_KIND_ENV_KEY,
                 PersistedProxyRuntimeSessionKind::ManagedExternal.as_env_value(),
@@ -436,8 +564,11 @@ impl ProxyService {
     async fn stop_server_unlocked(&self) -> Result<(), String> {
         let mut stopped_runtime = false;
 
-        if let Some(server) = self.runtime.server.read().await.as_ref() {
-            server.stop().await?;
+        if let Some(server) = self.runtime.server.write().await.take() {
+            if let Err(error) = server.stop().await {
+                *self.runtime.server.write().await = Some(server);
+                return Err(error);
+            }
             self.clear_persisted_runtime_session()?;
             self.sync_persisted_global_proxy_enabled(false).await?;
             return Ok(());
@@ -467,6 +598,43 @@ impl ProxyService {
             Ok(())
         } else {
             Err("proxy server is not running".to_string())
+        }
+    }
+
+    async fn stop_runtime_for_restart_unlocked(&self) -> Result<bool, String> {
+        if self.runtime.server.read().await.is_some() {
+            self.stop_server_unlocked().await?;
+            return Ok(true);
+        }
+
+        let Some(session) = self.load_persisted_runtime_session() else {
+            return Ok(false);
+        };
+
+        if !Self::is_process_alive(session.pid) {
+            self.clear_persisted_runtime_session()?;
+            self.sync_persisted_global_proxy_enabled(false).await?;
+            return Ok(false);
+        }
+
+        match session.kind {
+            PersistedProxyRuntimeSessionKind::ManagedExternal => {
+                self.stop_server_unlocked().await?;
+                Ok(true)
+            }
+            PersistedProxyRuntimeSessionKind::Foreground => {
+                let Some(_) = Self::probe_foreground_external_proxy_status(&session).await else {
+                    return Err(
+                        "proxy is running in a foreground external session that could not be verified for automatic restart; stop it manually"
+                            .to_string(),
+                    );
+                };
+
+                Self::terminate_external_process(session.pid).await?;
+                self.clear_persisted_runtime_session()?;
+                self.sync_persisted_global_proxy_enabled(false).await?;
+                Ok(true)
+            }
         }
     }
 
@@ -1797,6 +1965,34 @@ impl ProxyService {
         ExternalProxyStatusProbe::Matched(status)
     }
 
+    async fn probe_foreground_external_proxy_status(
+        session: &PersistedProxyRuntimeSession,
+    ) -> Option<ProxyStatus> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(500))
+            .build()
+            .ok()?;
+
+        let response = client
+            .get(Self::build_session_status_url(session))
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+
+        let mut status = response.json::<ProxyStatus>().await.ok()?;
+        status.running = true;
+        if status.address.trim().is_empty() {
+            status.address = session.address.clone();
+        }
+        if status.port == 0 {
+            status.port = session.port;
+        }
+        Some(status)
+    }
+
     fn build_session_status_url(session: &PersistedProxyRuntimeSession) -> String {
         let connect_host = match session.address.as_str() {
             "0.0.0.0" => "127.0.0.1".to_string(),
@@ -1865,9 +2061,11 @@ impl ProxyService {
     }
 
     fn spawn_managed_child_reaper(mut child: std::process::Child) {
-        tokio::task::spawn_blocking(move || {
-            let _ = child.wait();
-        });
+        let _ = std::thread::Builder::new()
+            .name("cc-switch-managed-proxy-reaper".to_string())
+            .spawn(move || {
+                let _ = child.wait();
+            });
     }
 
     fn ensure_managed_sessions_supported() -> Result<(), String> {

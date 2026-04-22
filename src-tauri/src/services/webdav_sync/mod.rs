@@ -144,9 +144,17 @@ impl WebDavSyncService {
         run_http(download())
     }
 
+    pub fn download_and_sync_local_runtime() -> Result<WebDavSyncSummary, AppError> {
+        run_http(download_and_sync_local_runtime())
+    }
+
     /// 用户确认后调用：下载 V1 数据 → 应用 → 上传 V2 → 删除 V1
     pub fn migrate_v1_to_v2() -> Result<WebDavSyncSummary, AppError> {
         run_http(migrate_v1_to_v2())
+    }
+
+    pub fn migrate_v1_to_v2_and_sync_local_runtime() -> Result<WebDavSyncSummary, AppError> {
+        run_http(migrate_v1_to_v2_and_sync_local_runtime())
     }
 }
 
@@ -270,6 +278,144 @@ async fn download() -> Result<WebDavSyncSummary, AppError> {
             "No downloadable sync data found on the remote",
         ))
     }
+}
+
+async fn download_and_sync_local_runtime() -> Result<WebDavSyncSummary, AppError> {
+    let (state, restart_plan) = prepare_restore_flow().await?;
+    let result = download().await;
+    finalize_restore_flow(state, restart_plan, "下载", "download", result).await
+}
+
+async fn migrate_v1_to_v2_and_sync_local_runtime() -> Result<WebDavSyncSummary, AppError> {
+    let (state, restart_plan) = prepare_restore_flow().await?;
+    let result = migrate_v1_to_v2().await;
+    finalize_restore_flow(state, restart_plan, "V1 迁移", "V1 migration", result).await
+}
+
+async fn prepare_restore_flow() -> Result<
+    (
+        crate::AppState,
+        Option<crate::services::proxy::ProxyRestartPlan>,
+    ),
+    AppError,
+> {
+    let state = crate::AppState::try_new_with_startup_recovery()?;
+    let restart_plan = state
+        .proxy_service
+        .capture_restart_plan()
+        .await
+        .map_err(AppError::Message)?;
+
+    if restart_plan.is_some() {
+        state
+            .proxy_service
+            .stop_runtime_for_restart()
+            .await
+            .map_err(AppError::Message)?;
+    }
+    if let Some(restart_plan) = restart_plan.as_ref() {
+        state
+            .proxy_service
+            .clear_takeovers_for_restart(&restart_plan.takeovers)
+            .await
+            .map_err(AppError::Message)?;
+    }
+
+    Ok((state, restart_plan))
+}
+
+async fn finalize_restore_flow(
+    state: crate::AppState,
+    restart_plan: Option<crate::services::proxy::ProxyRestartPlan>,
+    zh_action: &'static str,
+    en_action: &'static str,
+    result: Result<WebDavSyncSummary, AppError>,
+) -> Result<WebDavSyncSummary, AppError> {
+    match result {
+        Ok(summary) => {
+            let live_sync_result = sync_local_runtime_after_restore(&state, &summary);
+            let restart_result = restart_proxy_if_needed(&state, restart_plan.as_ref()).await;
+
+            if let Err(err) = live_sync_result {
+                if let Err(restart_err) = restart_result {
+                    return Err(combine_restore_followup_error(
+                        zh_action,
+                        en_action,
+                        err,
+                        restart_err,
+                    ));
+                }
+                return Err(err);
+            }
+
+            if let Err(restart_err) = restart_result {
+                return Err(proxy_restart_failed(zh_action, en_action, restart_err));
+            }
+
+            Ok(summary)
+        }
+        Err(err) => {
+            if let Err(restart_err) = restart_proxy_if_needed(&state, restart_plan.as_ref()).await {
+                return Err(combine_restore_followup_error(
+                    zh_action,
+                    en_action,
+                    err,
+                    restart_err,
+                ));
+            }
+            Err(err)
+        }
+    }
+}
+
+fn sync_local_runtime_after_restore(
+    state: &crate::AppState,
+    summary: &WebDavSyncSummary,
+) -> Result<(), AppError> {
+    if matches!(summary.decision, SyncDecision::V1MigrationNeeded) {
+        return Ok(());
+    }
+
+    state.refresh_config_from_db()?;
+    crate::services::ProviderService::sync_current_to_live(state)
+}
+
+async fn restart_proxy_if_needed(
+    state: &crate::AppState,
+    restart_plan: Option<&crate::services::proxy::ProxyRestartPlan>,
+) -> Result<(), String> {
+    let Some(restart_plan) = restart_plan else {
+        return Ok(());
+    };
+
+    state
+        .proxy_service
+        .restart_from_plan(restart_plan)
+        .await
+        .map(|_| ())
+}
+
+fn proxy_restart_failed(zh_action: &str, en_action: &str, restart_error: String) -> AppError {
+    localized(
+        "webdav.sync.proxy_restart_failed",
+        format!("WebDAV {zh_action}后自动重启本地代理失败: {restart_error}"),
+        format!("Failed to restart the local proxy after WebDAV {en_action}: {restart_error}"),
+    )
+}
+
+fn combine_restore_followup_error(
+    zh_action: &str,
+    en_action: &str,
+    primary_error: AppError,
+    restart_error: String,
+) -> AppError {
+    localized(
+        "webdav.sync.restore_followup_failed",
+        format!("{primary_error}；同时 WebDAV {zh_action}后的代理自动重启失败: {restart_error}"),
+        format!(
+            "{primary_error}; additionally, restarting the local proxy after WebDAV {en_action} failed: {restart_error}"
+        ),
+    )
 }
 
 // ---------------------------------------------------------------------------

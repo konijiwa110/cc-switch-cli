@@ -1,6 +1,6 @@
 use clap::Subcommand;
 
-use crate::cli::ui::{highlight, info, success, warning};
+use crate::cli::ui::{highlight, info, success};
 use crate::error::AppError;
 use crate::{
     get_webdav_sync_settings, set_webdav_sync_settings, webdav_jianguoyun_preset,
@@ -269,29 +269,15 @@ fn upload() -> Result<(), AppError> {
 }
 
 fn download() -> Result<(), AppError> {
-    let summary = WebDavSyncService::download()?;
-    sync_live_config_after_webdav();
+    let summary = WebDavSyncService::download_and_sync_local_runtime()?;
     println!("{}", success(&summary.message));
     Ok(())
 }
 
 fn migrate_v1_to_v2() -> Result<(), AppError> {
-    let summary = WebDavSyncService::migrate_v1_to_v2()?;
-    sync_live_config_after_webdav();
+    let summary = WebDavSyncService::migrate_v1_to_v2_and_sync_local_runtime()?;
     println!("{}", success(&summary.message));
     Ok(())
-}
-
-fn sync_live_config_after_webdav() {
-    let Ok(state) = crate::AppState::try_new() else {
-        return;
-    };
-
-    if let Err(err) = crate::services::ProviderService::sync_current_to_live(&state) {
-        let en = format!("Live config sync after WebDAV operation failed: {err}");
-        let zh = format!("WebDAV 操作后同步 live 配置失败: {err}");
-        println!("{}", warning(crate::t!(&en, &zh)));
-    }
 }
 
 #[allow(clippy::too_many_arguments)]

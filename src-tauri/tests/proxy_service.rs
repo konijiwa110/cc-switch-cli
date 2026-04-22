@@ -906,11 +906,50 @@ async fn proxy_service_stop_preserves_takeover_state_until_explicit_restore() {
         "stop should not restore the original Claude token"
     );
 
-    state
+    let restore_result = state
         .proxy_service
         .set_takeover_for_app("claude", false)
+        .await;
+    if let Err(error) = restore_result {
+        assert!(
+            error.contains("proxy server is not running"),
+            "unexpected explicit restore error after stop: {error}"
+        );
+    }
+
+    let takeover_after_restore = state
+        .proxy_service
+        .get_takeover_status()
         .await
-        .expect("explicit restore after stop");
+        .expect("read takeover status after explicit restore");
+    assert!(
+        !takeover_after_restore.claude,
+        "explicit restore should clear the preserved claude takeover flag"
+    );
+    assert!(
+        state
+            .db
+            .get_live_backup("claude")
+            .await
+            .expect("load claude live backup after explicit restore")
+            .is_none(),
+        "explicit restore should clear the preserved claude live backup"
+    );
+    let live_after_restore: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(get_claude_settings_path())
+            .expect("read claude live config after explicit restore"),
+    )
+    .expect("parse claude live config after explicit restore");
+    assert_eq!(
+        live_after_restore,
+        json!({
+            "env": {
+                "ANTHROPIC_API_KEY": "original-key",
+                "ANTHROPIC_BASE_URL": "https://api.anthropic.com"
+            }
+        }),
+        "explicit restore should restore the original Claude live config even if the runtime was already stopped"
+    );
 }
 
 #[cfg(unix)]

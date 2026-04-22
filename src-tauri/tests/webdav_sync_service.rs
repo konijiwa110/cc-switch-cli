@@ -3,6 +3,7 @@ use std::{
     net::TcpListener,
     sync::{Arc, Mutex},
     thread,
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -14,8 +15,8 @@ use axum::{
     Router,
 };
 use cc_switch_lib::{
-    set_webdav_sync_settings, AppState as CcAppState, Provider, WebDavSyncService,
-    WebDavSyncSettings, WebDavSyncStatus,
+    get_claude_settings_path, read_json_file, set_webdav_sync_settings, AppState as CcAppState,
+    Provider, SyncDecision, WebDavSyncService, WebDavSyncSettings, WebDavSyncStatus,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
@@ -380,13 +381,13 @@ fn empty_zip_bytes() -> Vec<u8> {
     cursor.into_inner()
 }
 
-fn seed_claude_remote_provider(state: &CcAppState) {
+fn seed_claude_provider(state: &CcAppState, provider_id: &str, api_key: &str) {
     let provider = Provider::with_id(
-        "claude-provider".to_string(),
+        provider_id.to_string(),
         "Claude Provider".to_string(),
         serde_json::json!({
             "env": {
-                "ANTHROPIC_API_KEY": "db-key"
+                "ANTHROPIC_API_KEY": api_key
             }
         }),
         Some("claude".to_string()),
@@ -401,8 +402,12 @@ fn seed_claude_remote_provider(state: &CcAppState) {
         .expect("set current claude provider");
 }
 
-fn seed_claude_live() {
-    let path = cc_switch_lib::get_claude_settings_path();
+fn seed_claude_remote_provider(state: &CcAppState) {
+    seed_claude_provider(state, "claude-provider", "db-key");
+}
+
+fn seed_claude_live_with_key(api_key: &str) {
+    let path = get_claude_settings_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).expect("create claude live dir");
     }
@@ -410,12 +415,94 @@ fn seed_claude_live() {
         path,
         serde_json::to_string_pretty(&serde_json::json!({
             "env": {
-                "ANTHROPIC_API_KEY": "live-key"
+                "ANTHROPIC_API_KEY": api_key
             }
         }))
         .expect("serialize claude live"),
     )
     .expect("write claude live");
+}
+
+fn seed_claude_live() {
+    seed_claude_live_with_key("live-key");
+}
+
+fn read_claude_live_api_key() -> Option<String> {
+    read_json_file::<serde_json::Value>(&get_claude_settings_path())
+        .ok()
+        .and_then(|value| {
+            value
+                .get("env")
+                .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+}
+
+fn load_runtime_session_pid(state: &CcAppState) -> Option<u32> {
+    state
+        .db
+        .get_setting("proxy_runtime_session")
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|value| value.get("pid").and_then(|value| value.as_u64()))
+        .map(|pid| pid as u32)
+}
+
+#[cfg(unix)]
+fn is_process_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+
+    let rc = unsafe { libc::kill(pid as i32, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(unix)]
+fn wait_for<F>(timeout: Duration, mut condition: F)
+where
+    F: FnMut() -> bool,
+{
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        if condition() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    panic!("condition was not met within {:?}", timeout);
+}
+
+#[cfg(unix)]
+fn ensure_process_stopped(pid: u32) {
+    if !is_process_alive(pid) {
+        return;
+    }
+
+    let _ = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+    wait_for(Duration::from_secs(5), || !is_process_alive(pid));
+}
+
+#[cfg(unix)]
+struct ManagedSessionCleanup(Option<u32>);
+
+#[cfg(unix)]
+impl ManagedSessionCleanup {
+    fn new(pid: u32) -> Self {
+        Self(Some(pid))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ManagedSessionCleanup {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0.take() {
+            ensure_process_stopped(pid);
+        }
+    }
 }
 
 fn assert_probe_round_trip(snapshot: &ServerSnapshot) {
@@ -887,6 +974,7 @@ fn webdav_download_rejects_when_proxy_running() {
     seed_claude_remote_provider(&state);
     WebDavSyncService::upload().expect("seed remote v2 snapshot");
 
+    let proxy_port = find_free_port();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -897,7 +985,7 @@ fn webdav_download_rejects_when_proxy_running() {
             .get_config()
             .await
             .expect("read proxy config");
-        config.listen_port = find_free_port();
+        config.listen_port = proxy_port;
         state
             .proxy_service
             .update_config(&config)
@@ -1027,13 +1115,18 @@ fn webdav_migrate_v1_to_v2_rejects_when_takeover_is_active() {
         "unexpected error: {err}"
     );
 
-    runtime.block_on(async {
+    let cleanup_result = runtime.block_on(async {
         state
             .proxy_service
             .set_takeover_for_app("claude", false)
             .await
-            .expect("clear takeover state");
     });
+    if let Err(error) = cleanup_result {
+        assert!(
+            error.contains("proxy server is not running"),
+            "unexpected cleanup error: {error}"
+        );
+    }
 }
 
 #[test]
@@ -1122,11 +1215,147 @@ fn webdav_download_rejects_when_takeover_artifacts_exist_even_if_enabled_flag_is
         "unexpected error: {err}"
     );
 
-    runtime.block_on(async {
+    let cleanup_result = runtime.block_on(async {
         state
             .proxy_service
             .set_takeover_for_app("claude", false)
             .await
-            .expect("clear takeover artifacts for cleanup");
     });
+    if let Err(error) = cleanup_result {
+        assert!(
+            error.contains("proxy server is not running"),
+            "unexpected cleanup error: {error}"
+        );
+    }
+}
+
+#[test]
+fn webdav_download_and_sync_local_runtime_updates_claude_live_file() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let server = TestWebDavServer::start_with_config(ServerConfig::for_manifest_readback(
+        ProbeReadback::Stored,
+        ManifestHeadBehavior::Missing,
+    ));
+    set_webdav_sync_settings(Some(sample_settings(&server.base_url)))
+        .expect("save test WebDAV settings");
+
+    let state = CcAppState::try_new().expect("create app state");
+    seed_claude_provider(&state, "remote-provider", "remote-key");
+    WebDavSyncService::upload().expect("seed remote v2 snapshot");
+    seed_claude_live_with_key("stale-live-key");
+
+    let summary = WebDavSyncService::download_and_sync_local_runtime()
+        .expect("download should sync current provider into local live config");
+
+    assert_eq!(
+        summary.decision,
+        SyncDecision::Download,
+        "download wrapper should still report a normal download decision"
+    );
+    assert_eq!(
+        read_claude_live_api_key().as_deref(),
+        Some("remote-key"),
+        "download wrapper should replace the local Claude live token from the downloaded provider snapshot"
+    );
+}
+
+#[test]
+fn webdav_download_and_sync_local_runtime_restarts_proxy_and_reapplies_takeover() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let server = TestWebDavServer::start_with_config(ServerConfig::for_manifest_readback(
+        ProbeReadback::Stored,
+        ManifestHeadBehavior::Missing,
+    ));
+    set_webdav_sync_settings(Some(sample_settings(&server.base_url)))
+        .expect("save test WebDAV settings");
+
+    let state = CcAppState::try_new().expect("create app state");
+    seed_claude_provider(&state, "remote-provider", "remote-key");
+    WebDavSyncService::upload().expect("seed remote v2 snapshot");
+
+    seed_claude_provider(&state, "local-provider", "local-key");
+    seed_claude_live_with_key("live-before-takeover");
+
+    let proxy_port = find_free_port();
+    {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build test runtime");
+        runtime.block_on(async {
+            let mut config = state
+                .proxy_service
+                .get_config()
+                .await
+                .expect("read proxy config");
+            config.listen_port = proxy_port;
+            state
+                .proxy_service
+                .update_config(&config)
+                .await
+                .expect("update proxy config");
+            state
+                .proxy_service
+                .set_managed_session_for_app("claude", true)
+                .await
+                .expect("start managed proxy for claude before download");
+            assert!(
+                state.proxy_service.is_running().await,
+                "precondition: managed session should start the local proxy runtime"
+            );
+        });
+    }
+
+    let summary = WebDavSyncService::download_and_sync_local_runtime()
+        .expect("download wrapper should stop, sync, and restart the proxy runtime");
+
+    assert_eq!(
+        summary.decision,
+        SyncDecision::Download,
+        "download wrapper should still report a normal download decision"
+    );
+
+    let reloaded = CcAppState::try_new().expect("reload app state after wrapper download");
+    let runtime_pid = load_runtime_session_pid(&reloaded)
+        .expect("download wrapper should publish a restarted proxy runtime session");
+    assert!(
+        runtime_pid > 0,
+        "restarted proxy runtime should have a valid pid"
+    );
+    #[cfg(unix)]
+    let _cleanup = ManagedSessionCleanup::new(runtime_pid);
+
+    assert_eq!(
+        reloaded
+            .db
+            .get_current_provider("claude")
+            .expect("read current provider after wrapper download")
+            .as_deref(),
+        Some("remote-provider"),
+        "download wrapper should restore the downloaded current provider into the local database"
+    );
+    let taken_over: serde_json::Value =
+        read_json_file(&get_claude_settings_path()).expect("read claude live config after restart");
+    assert_eq!(
+        taken_over
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
+            .and_then(|value| value.as_str()),
+        Some(format!("http://127.0.0.1:{proxy_port}").as_str()),
+        "download wrapper should reapply Claude takeover through the restarted local proxy"
+    );
+    assert_eq!(
+        taken_over
+            .get("env")
+            .and_then(|env| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|value| value.as_str()),
+        Some("PROXY_MANAGED"),
+        "download wrapper should put Claude back into managed takeover mode after syncing the downloaded provider"
+    );
 }

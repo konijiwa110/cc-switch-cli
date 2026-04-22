@@ -211,17 +211,19 @@ fn webdav_worker_loop(rx: mpsc::Receiver<WebDavReq>, tx: mpsc::Sender<WebDavMsg>
                     message: summary.message,
                 })
                 .map_err(|e| WebDavErr::Generic(e.to_string())),
-            WebDavReqKind::Download => WebDavSyncService::download()
+            WebDavReqKind::Download => WebDavSyncService::download_and_sync_local_runtime()
                 .map(|summary| WebDavDone::Downloaded {
                     decision: summary.decision,
                     message: summary.message,
                 })
                 .map_err(|e| WebDavErr::Generic(e.to_string())),
-            WebDavReqKind::MigrateV1ToV2 => WebDavSyncService::migrate_v1_to_v2()
-                .map(|summary| WebDavDone::V1Migrated {
-                    message: summary.message,
-                })
-                .map_err(|e| WebDavErr::Generic(e.to_string())),
+            WebDavReqKind::MigrateV1ToV2 => {
+                { WebDavSyncService::migrate_v1_to_v2_and_sync_local_runtime() }
+                    .map(|summary| WebDavDone::V1Migrated {
+                        message: summary.message,
+                    })
+                    .map_err(|e| WebDavErr::Generic(e.to_string()))
+            }
             WebDavReqKind::JianguoyunQuickSetup { username, password } => {
                 let cfg = webdav_jianguoyun_preset(&username, &password);
                 if let Err(err) = set_webdav_sync_settings(Some(cfg)) {

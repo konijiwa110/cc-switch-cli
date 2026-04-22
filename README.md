@@ -2,12 +2,10 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.3.3-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.3.3-blue.svg)](https://github.com/zekza/cc-switch-cli/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/zekza/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-
-<a href="https://trendshift.io/repositories/22544" target="_blank"><img src="https://trendshift.io/api/badge/repositories/22544" alt="SaladDay%2Fcc-switch-cli | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
 
 **Command-Line Management Tool for Claude Code, Codex, Gemini, OpenCode & OpenClaw**
 
@@ -152,7 +150,7 @@ See the "Features" section for full command list.
 > Windows users: see Manual Installation below.
 
 ```bash
-curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.sh | bash
+curl -fsSL https://github.com/zekza/cc-switch-cli/releases/latest/download/install.sh | bash
 ```
 
 This installs `cc-switch` to `~/.local/bin`. Set `CC_SWITCH_INSTALL_DIR` to change the target directory.
@@ -167,7 +165,7 @@ This installs `cc-switch` to `~/.local/bin`. Set `CC_SWITCH_INSTALL_DIR` to chan
 
 ```bash
 # Download Universal Binary (recommended, supports Apple Silicon + Intel)
-curl -LO https://github.com/saladday/cc-switch-cli/releases/latest/download/cc-switch-cli-darwin-universal.tar.gz
+curl -LO https://github.com/zekza/cc-switch-cli/releases/latest/download/cc-switch-cli-darwin-universal.tar.gz
 
 # Extract
 tar -xzf cc-switch-cli-darwin-universal.tar.gz
@@ -186,7 +184,7 @@ xattr -cr /usr/local/bin/cc-switch
 
 ```bash
 # Download
-curl -LO https://github.com/saladday/cc-switch-cli/releases/latest/download/cc-switch-cli-linux-x64-musl.tar.gz
+curl -LO https://github.com/zekza/cc-switch-cli/releases/latest/download/cc-switch-cli-linux-x64-musl.tar.gz
 
 # Extract
 tar -xzf cc-switch-cli-linux-x64-musl.tar.gz
@@ -202,7 +200,7 @@ sudo mv cc-switch /usr/local/bin/
 
 ```bash
 # For Raspberry Pi or ARM servers
-curl -LO https://github.com/saladday/cc-switch-cli/releases/latest/download/cc-switch-cli-linux-arm64-musl.tar.gz
+curl -LO https://github.com/zekza/cc-switch-cli/releases/latest/download/cc-switch-cli-linux-arm64-musl.tar.gz
 tar -xzf cc-switch-cli-linux-arm64-musl.tar.gz
 chmod +x cc-switch
 sudo mv cc-switch /usr/local/bin/
@@ -212,7 +210,7 @@ sudo mv cc-switch /usr/local/bin/
 
 ```powershell
 # Download the zip file
-# https://github.com/saladday/cc-switch-cli/releases/latest/download/cc-switch-cli-windows-x64.zip
+# https://github.com/zekza/cc-switch-cli/releases/latest/download/cc-switch-cli-windows-x64.zip
 
 # After extracting, move cc-switch.exe to a PATH directory, e.g.:
 move cc-switch.exe C:\Windows\System32\
@@ -230,7 +228,7 @@ move cc-switch.exe C:\Windows\System32\
 
 **Build:**
 ```bash
-git clone https://github.com/saladday/cc-switch-cli.git
+git clone https://github.com/zekza/cc-switch-cli.git
 cd cc-switch-cli/src-tauri
 cargo build --release
 
@@ -520,7 +518,7 @@ cc-switch --app codex provider list
 
 <br>
 
-Please open an issue on our [GitHub Issues](https://github.com/saladday/cc-switch-cli/issues) page with:
+Please open an issue on our [GitHub Issues](https://github.com/zekza/cc-switch-cli/issues) page with:
 - Detailed description of the problem or feature request
 - Steps to reproduce (for bugs)
 - Your system information (OS, version)

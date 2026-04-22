@@ -2,6 +2,12 @@
 
 ## 2026-04-22
 
+### 更新源切换到 `zekza/cc-switch-cli`
+
+- 将编译元数据中的仓库地址改为 `https://github.com/zekza/cc-switch-cli`，让 `cc-switch update` 默认从这个 GitHub 仓库读取 release。
+- 将 `install.sh` 的下载仓库改为 `zekza/cc-switch-cli`，保持脚本安装与 CLI 自更新使用同一发布源。
+- 更新 release workflow、README 中的安装、手动下载、源码克隆和 issue 链接，统一对外指向新仓库。
+
 ### WebDAV 恢复补齐本地同步与代理重启
 
 - `config webdav download` 和 `config webdav migrate-v1-to-v2` 现在会在恢复前捕获当前 proxy 运行状态与 takeover 状态。

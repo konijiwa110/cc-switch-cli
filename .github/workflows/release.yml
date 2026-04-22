@@ -298,7 +298,7 @@ jobs:
             release-assets \
             "${GITHUB_REF_NAME}" \
             "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-            "https://github.com/SaladDay/cc-switch-cli/releases/download/${GITHUB_REF_NAME}" \
+            "https://github.com/zekza/cc-switch-cli/releases/download/${GITHUB_REF_NAME}" \
             "CC Switch CLI ${GITHUB_REF_NAME}"
 
           rm -f release-assets/*.minisig
@@ -338,7 +338,7 @@ jobs:
 
             **macOS / Linux (one-liner):**
             ```bash
-            curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.sh | bash
+            curl -fsSL https://github.com/zekza/cc-switch-cli/releases/latest/download/install.sh | bash
             ```
 
             **Windows:**

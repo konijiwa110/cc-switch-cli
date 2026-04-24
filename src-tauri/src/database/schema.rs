@@ -356,15 +356,11 @@ impl Database {
 
         let mut version = Self::get_user_version(conn)?;
 
-        if version > SCHEMA_VERSION {
-            conn.execute("ROLLBACK TO schema_migration;", []).ok();
-            conn.execute("RELEASE schema_migration;", []).ok();
-            return Err(AppError::Database(format!(
-                "数据库版本过新（{version}），当前应用仅支持 {SCHEMA_VERSION}，请升级应用后再尝试。"
-            )));
-        }
-
         let result = (|| {
+            if version > SCHEMA_VERSION {
+                return Self::validate_newer_schema_compatibility(conn, version);
+            }
+
             while version < SCHEMA_VERSION {
                 match version {
                     0 => {
@@ -432,6 +428,318 @@ impl Database {
                 Err(e)
             }
         }
+    }
+
+    fn validate_newer_schema_compatibility(
+        conn: &Connection,
+        version: i32,
+    ) -> Result<(), AppError> {
+        Self::apply_non_destructive_schema_repairs(conn)?;
+
+        let missing = Self::collect_missing_required_schema_entries(conn)?;
+        if missing.is_empty() {
+            log::warn!(
+                "检测到较新的数据库版本 {version}，已验证当前运行所需结构完整，按兼容模式继续启动"
+            );
+            return Ok(());
+        }
+
+        let preview = missing
+            .iter()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("、");
+        let suffix = if missing.len() > 10 {
+            format!(" 等 {} 处", missing.len())
+        } else {
+            String::new()
+        };
+
+        Err(AppError::Database(format!(
+            "数据库版本较新（{version}），但缺少当前版本运行所需结构：{preview}{suffix}。请升级应用后再尝试。"
+        )))
+    }
+
+    fn apply_non_destructive_schema_repairs(conn: &Connection) -> Result<(), AppError> {
+        Self::create_tables_on_conn(conn)?;
+
+        // 这些列由历史迁移补齐，但 create_tables() 不会覆盖已有旧表。
+        // 对更高版本数据库仅做非破坏性补列，避免为了兼容而重建表。
+        let repairs: &[(&str, &str, &str)] = &[
+            (
+                "providers",
+                "cost_multiplier",
+                "TEXT NOT NULL DEFAULT '1.0'",
+            ),
+            ("providers", "limit_daily_usd", "TEXT"),
+            ("providers", "limit_monthly_usd", "TEXT"),
+            ("providers", "provider_type", "TEXT"),
+            (
+                "proxy_config",
+                "live_takeover_active",
+                "INTEGER NOT NULL DEFAULT 0",
+            ),
+            ("proxy_request_logs", "request_model", "TEXT"),
+            ("proxy_request_logs", "provider_type", "TEXT"),
+            (
+                "proxy_request_logs",
+                "is_streaming",
+                "INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "proxy_request_logs",
+                "cost_multiplier",
+                "TEXT NOT NULL DEFAULT '1.0'",
+            ),
+            ("proxy_request_logs", "first_token_ms", "INTEGER"),
+            ("proxy_request_logs", "duration_ms", "INTEGER"),
+            (
+                "proxy_request_logs",
+                "data_source",
+                "TEXT NOT NULL DEFAULT 'proxy'",
+            ),
+            (
+                "mcp_servers",
+                "enabled_opencode",
+                "BOOLEAN NOT NULL DEFAULT 0",
+            ),
+            ("skills", "enabled_opencode", "BOOLEAN NOT NULL DEFAULT 0"),
+            ("skills", "content_hash", "TEXT"),
+            ("skills", "updated_at", "INTEGER NOT NULL DEFAULT 0"),
+        ];
+
+        for (table, column, definition) in repairs {
+            Self::add_column_if_missing(conn, table, column, definition)?;
+        }
+
+        Ok(())
+    }
+
+    fn collect_missing_required_schema_entries(conn: &Connection) -> Result<Vec<String>, AppError> {
+        let required_schema: &[(&str, &[&str])] = &[
+            (
+                "providers",
+                &[
+                    "id",
+                    "app_type",
+                    "name",
+                    "settings_config",
+                    "website_url",
+                    "category",
+                    "created_at",
+                    "sort_index",
+                    "notes",
+                    "icon",
+                    "icon_color",
+                    "meta",
+                    "is_current",
+                    "in_failover_queue",
+                    "cost_multiplier",
+                    "limit_daily_usd",
+                    "limit_monthly_usd",
+                    "provider_type",
+                ],
+            ),
+            (
+                "provider_endpoints",
+                &["id", "provider_id", "app_type", "url", "added_at"],
+            ),
+            (
+                "mcp_servers",
+                &[
+                    "id",
+                    "name",
+                    "server_config",
+                    "description",
+                    "homepage",
+                    "docs",
+                    "tags",
+                    "enabled_claude",
+                    "enabled_codex",
+                    "enabled_gemini",
+                    "enabled_opencode",
+                ],
+            ),
+            (
+                "prompts",
+                &[
+                    "id",
+                    "app_type",
+                    "name",
+                    "content",
+                    "description",
+                    "enabled",
+                    "created_at",
+                    "updated_at",
+                ],
+            ),
+            (
+                "skills",
+                &[
+                    "id",
+                    "name",
+                    "description",
+                    "directory",
+                    "repo_owner",
+                    "repo_name",
+                    "repo_branch",
+                    "readme_url",
+                    "enabled_claude",
+                    "enabled_codex",
+                    "enabled_gemini",
+                    "enabled_opencode",
+                    "installed_at",
+                    "content_hash",
+                    "updated_at",
+                ],
+            ),
+            ("skill_repos", &["owner", "name", "branch", "enabled"]),
+            ("settings", &["key", "value"]),
+            (
+                "proxy_config",
+                &[
+                    "app_type",
+                    "proxy_enabled",
+                    "listen_address",
+                    "listen_port",
+                    "enable_logging",
+                    "enabled",
+                    "auto_failover_enabled",
+                    "max_retries",
+                    "streaming_first_byte_timeout",
+                    "streaming_idle_timeout",
+                    "non_streaming_timeout",
+                    "circuit_failure_threshold",
+                    "circuit_success_threshold",
+                    "circuit_timeout_seconds",
+                    "circuit_error_rate_threshold",
+                    "circuit_min_requests",
+                    "default_cost_multiplier",
+                    "pricing_model_source",
+                    "created_at",
+                    "updated_at",
+                    "live_takeover_active",
+                ],
+            ),
+            (
+                "provider_health",
+                &[
+                    "provider_id",
+                    "app_type",
+                    "is_healthy",
+                    "consecutive_failures",
+                    "last_success_at",
+                    "last_failure_at",
+                    "last_error",
+                    "updated_at",
+                ],
+            ),
+            (
+                "proxy_request_logs",
+                &[
+                    "request_id",
+                    "provider_id",
+                    "app_type",
+                    "model",
+                    "request_model",
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_read_tokens",
+                    "cache_creation_tokens",
+                    "input_cost_usd",
+                    "output_cost_usd",
+                    "cache_read_cost_usd",
+                    "cache_creation_cost_usd",
+                    "total_cost_usd",
+                    "latency_ms",
+                    "first_token_ms",
+                    "duration_ms",
+                    "status_code",
+                    "error_message",
+                    "session_id",
+                    "provider_type",
+                    "is_streaming",
+                    "cost_multiplier",
+                    "created_at",
+                    "data_source",
+                ],
+            ),
+            (
+                "model_pricing",
+                &[
+                    "model_id",
+                    "display_name",
+                    "input_cost_per_million",
+                    "output_cost_per_million",
+                    "cache_read_cost_per_million",
+                    "cache_creation_cost_per_million",
+                ],
+            ),
+            (
+                "stream_check_logs",
+                &[
+                    "id",
+                    "provider_id",
+                    "provider_name",
+                    "app_type",
+                    "status",
+                    "success",
+                    "message",
+                    "response_time_ms",
+                    "http_status",
+                    "model_used",
+                    "retry_count",
+                    "tested_at",
+                ],
+            ),
+            (
+                "proxy_live_backup",
+                &["app_type", "original_config", "backed_up_at"],
+            ),
+            (
+                "usage_daily_rollups",
+                &[
+                    "date",
+                    "app_type",
+                    "provider_id",
+                    "model",
+                    "request_count",
+                    "success_count",
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_read_tokens",
+                    "cache_creation_tokens",
+                    "total_cost_usd",
+                    "avg_latency_ms",
+                ],
+            ),
+            (
+                "session_log_sync",
+                &[
+                    "file_path",
+                    "last_modified",
+                    "last_line_offset",
+                    "last_synced_at",
+                ],
+            ),
+        ];
+
+        let mut missing = Vec::new();
+        for (table, columns) in required_schema {
+            if !Self::table_exists(conn, table)? {
+                missing.push((*table).to_string());
+                continue;
+            }
+
+            for column in *columns {
+                if !Self::has_column(conn, table, column)? {
+                    missing.push(format!("{table}.{column}"));
+                }
+            }
+        }
+
+        Ok(missing)
     }
 
     /// v0 -> v1 迁移：补齐所有缺失列

@@ -169,16 +169,60 @@ fn schema_migration_sets_user_version_when_missing() {
 }
 
 #[test]
-fn schema_migration_rejects_future_version() {
+fn schema_migration_accepts_newer_version_when_required_shape_exists() {
     let conn = Connection::open_in_memory().expect("open memory db");
     Database::create_tables_on_conn(&conn).expect("create tables");
-    Database::set_user_version(&conn, SCHEMA_VERSION + 1).expect("set future version");
+    Database::set_user_version(&conn, SCHEMA_VERSION + 2).expect("set future version");
 
-    let err =
-        Database::apply_schema_migrations_on_conn(&conn).expect_err("should reject higher version");
+    Database::apply_schema_migrations_on_conn(&conn)
+        .expect("newer version with compatible shape should pass");
+
     assert!(
-        err.to_string().contains("数据库版本过新"),
-        "unexpected error: {err}"
+        Database::has_column(&conn, "providers", "cost_multiplier")
+            .expect("check repaired providers.cost_multiplier"),
+        "providers.cost_multiplier should be repaired for newer schema"
+    );
+    assert!(
+        Database::has_column(&conn, "proxy_config", "live_takeover_active")
+            .expect("check repaired proxy_config.live_takeover_active"),
+        "proxy_config.live_takeover_active should exist for newer schema"
+    );
+    assert_eq!(
+        Database::get_user_version(&conn).expect("read version after compatibility check"),
+        SCHEMA_VERSION + 2
+    );
+}
+
+#[test]
+fn schema_migration_rejects_newer_version_when_required_shape_missing() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    Database::create_tables_on_conn(&conn).expect("create tables");
+    Database::set_user_version(&conn, SCHEMA_VERSION).expect("set current version");
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply current migrations");
+
+    conn.execute("DROP TABLE skills", [])
+        .expect("drop current skills table");
+    conn.execute(
+        "CREATE TABLE skills (
+            key TEXT PRIMARY KEY,
+            installed BOOLEAN NOT NULL DEFAULT 0
+        )",
+        [],
+    )
+    .expect("create incompatible future skills table");
+
+    Database::set_user_version(&conn, SCHEMA_VERSION + 2).expect("set future version");
+
+    let err = Database::apply_schema_migrations_on_conn(&conn)
+        .expect_err("should reject newer version with incompatible shape");
+    let message = err.to_string();
+    assert!(
+        message.contains("数据库版本较新"),
+        "unexpected error: {message}"
+    );
+    assert!(
+        message.contains("skills.id"),
+        "missing structure should be surfaced, got: {message}"
     );
 }
 
